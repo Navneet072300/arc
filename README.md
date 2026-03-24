@@ -1,4 +1,4 @@
-# TuskDB
+# Arc
 
 > Serverless PostgreSQL as a Service, running on Kubernetes.
 > Provision isolated PostgreSQL instances on demand — no infrastructure management required.
@@ -7,7 +7,7 @@
 
 ## Overview
 
-TuskDB is a self-hosted serverless database platform that lets users spin up managed PostgreSQL instances through a REST API or web dashboard. Each instance runs in its own Kubernetes namespace with dedicated storage, credentials, and networking. Users never touch Kubernetes — they just get a connection string.
+Arc is a self-hosted serverless database platform that lets users spin up managed PostgreSQL instances through a REST API or web dashboard. Each instance runs in its own Kubernetes namespace with dedicated storage, credentials, and networking. Users never touch Kubernetes — they just get a connection string.
 
 **Inspired by:** Neon, Supabase, Render Postgres
 **Runs on:** AWS EKS (production) · minikube (local development)
@@ -21,7 +21,7 @@ TuskDB is a self-hosted serverless database platform that lets users spin up man
                         │               AWS EKS Cluster            │
                         │                                          │
   Users ──► ALB ──► ┌──┴──────────┐     ┌──────────────────────┐ │
-                     │  TuskDB API │────►│  pg-<id>-<name>      │ │
+                     │  Arc API │────►│  pg-<id>-<name>      │ │
                      │  (FastAPI)  │     │  ┌──────────────────┐│ │
                      └──────┬──────┘     │  │ StatefulSet (PG) ││ │
                             │            │  │ Secret           ││ │
@@ -74,7 +74,7 @@ TuskDB is a self-hosted serverless database platform that lets users spin up man
 ## Project Structure
 
 ```
-tuskdb/
+arc/
 ├── api/
 │   ├── main.py               # App factory, lifespan, scheduler
 │   ├── config.py             # All settings via env vars
@@ -98,7 +98,7 @@ tuskdb/
 │   └── billing/index.html    # Usage & billing
 ├── k8s/
 │   ├── rbac/                 # ClusterRole, ServiceAccount, Binding
-│   └── api-deployment.yaml   # TuskDB API deployment manifest
+│   └── api-deployment.yaml   # Arc API deployment manifest
 ├── scripts/
 │   ├── setup_minikube.sh     # Local dev bootstrap
 │   └── seed_db.sh            # Insert test admin user
@@ -123,8 +123,8 @@ tuskdb/
 
 ```bash
 # 1. Clone and enter the project
-git clone https://github.com/your-org/tuskdb.git
-cd tuskdb
+git clone https://github.com/your-org/arc.git
+cd arc
 
 # 2. Create virtual environment and install dependencies
 python3 -m venv .venv
@@ -169,7 +169,7 @@ Open **http://localhost:8000/docs** for the interactive API docs
 
 ```bash
 eksctl create cluster \
-  --name tuskdb \
+  --name arc \
   --region us-east-1 \
   --nodegroup-name standard-workers \
   --node-type t3.medium \
@@ -187,7 +187,7 @@ Required so that `LoadBalancer` services get an NLB automatically.
 helm repo add eks https://aws.github.io/eks-charts
 helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
   -n kube-system \
-  --set clusterName=tuskdb
+  --set clusterName=arc
 ```
 
 ### 3. Enable Metrics Server
@@ -206,7 +206,7 @@ kubectl apply -f k8s/rbac/
 
 ```bash
 kubectl create secret generic serverless-pg-api-env \
-  --from-literal=DATABASE_URL="postgresql+asyncpg://user:pass@rds-endpoint:5432/tuskdb" \
+  --from-literal=DATABASE_URL="postgresql+asyncpg://user:pass@rds-endpoint:5432/arc" \
   --from-literal=SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
@@ -218,9 +218,9 @@ aws ecr get-login-password --region us-east-1 | \
   docker login --username AWS --password-stdin <account>.dkr.ecr.us-east-1.amazonaws.com
 
 # Build and push
-docker build -t tuskdb-api .
-docker tag tuskdb-api:latest <account>.dkr.ecr.us-east-1.amazonaws.com/tuskdb-api:latest
-docker push <account>.dkr.ecr.us-east-1.amazonaws.com/tuskdb-api:latest
+docker build -t arc-api .
+docker tag arc-api:latest <account>.dkr.ecr.us-east-1.amazonaws.com/arc-api:latest
+docker push <account>.dkr.ecr.us-east-1.amazonaws.com/arc-api:latest
 ```
 
 Update the image in `k8s/api-deployment.yaml`, then:
