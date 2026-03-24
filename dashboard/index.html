@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ServerlessDB</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f0f0f;
+      --surface: #1c1c1c;
+      --border: #2a2a2a;
+      --green: #3ecf8e;
+      --text: #ededed;
+      --muted: #8c8c8c;
+      --danger: #e55353;
+      --radius: 6px;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .box { width: 360px; }
+    .logo { display: flex; align-items: center; gap: 10px; justify-content: center; margin-bottom: 32px; }
+    .logo svg { color: var(--green); }
+    .logo-text { font-size: 1.25rem; font-weight: 700; letter-spacing: -.3px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 28px; }
+    h2 { font-size: 1rem; font-weight: 600; margin-bottom: 4px; }
+    .subtitle { font-size: .875rem; color: var(--muted); margin-bottom: 24px; }
+    .form-group { margin-bottom: 16px; }
+    label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: 6px; letter-spacing: .02em; }
+    input { width: 100%; padding: 8px 12px; background: #111; border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: .875rem; outline: none; transition: border-color .15s; }
+    input:focus { border-color: var(--green); }
+    .btn { width: 100%; padding: 9px; border: none; border-radius: var(--radius); font-size: .875rem; font-weight: 500; cursor: pointer; transition: opacity .15s; }
+    .btn-green { background: var(--green); color: #000; }
+    .btn-green:hover { opacity: .88; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .alert { padding: 10px 12px; border-radius: var(--radius); font-size: .8rem; margin-bottom: 16px; background: rgba(229,83,83,.1); border: 1px solid rgba(229,83,83,.3); color: var(--danger); }
+    .toggle { text-align: center; font-size: .8rem; color: var(--muted); margin-top: 16px; }
+    .toggle a { color: var(--green); cursor: pointer; text-decoration: none; }
+    .toggle a:hover { text-decoration: underline; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+<div class="box">
+  <div class="logo">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>
+    </svg>
+    <span class="logo-text">ServerlessDB</span>
+  </div>
+
+  <div class="card">
+    <!-- Login -->
+    <div id="login-view">
+      <h2>Sign in</h2>
+      <p class="subtitle">Welcome back</p>
+      <div id="alert-l" class="alert hidden"></div>
+      <div class="form-group"><label for="l-email">EMAIL</label><input id="l-email" type="email" placeholder="you@example.com" /></div>
+      <div class="form-group"><label for="l-pass">PASSWORD</label><input id="l-pass" type="password" placeholder="••••••••" /></div>
+      <button type="button" class="btn btn-green" id="l-btn" onclick="doLogin()">Sign In</button>
+      <div class="toggle">Don't have an account? <a onclick="show('register')">Register</a></div>
+    </div>
+
+    <!-- Register -->
+    <div id="register-view" class="hidden">
+      <h2>Create account</h2>
+      <p class="subtitle">Get started for free</p>
+      <div id="alert-r" class="alert hidden"></div>
+      <div class="form-group"><label for="r-name">FULL NAME</label><input id="r-name" type="text" placeholder="Jane Doe" /></div>
+      <div class="form-group"><label for="r-email">EMAIL</label><input id="r-email" type="email" placeholder="you@example.com" /></div>
+      <div class="form-group"><label for="r-pass">PASSWORD</label><input id="r-pass" type="password" placeholder="min 8 characters" /></div>
+      <button type="button" class="btn btn-green" id="r-btn" onclick="doRegister()">Create Account</button>
+      <div class="toggle">Already have an account? <a onclick="show('login')">Sign in</a></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  if (localStorage.getItem('access_token')) location.href = '/ui/app';
+
+  function show(v) {
+    document.getElementById('login-view').classList.toggle('hidden', v !== 'login');
+    document.getElementById('register-view').classList.toggle('hidden', v !== 'register');
+  }
+
+  function err(id, msg) {
+    const el = document.getElementById(id);
+    el.textContent = msg;
+    el.classList.remove('hidden');
+  }
+
+  async function doLogin() {
+    const btn = document.getElementById('l-btn');
+    btn.disabled = true; btn.textContent = 'Signing in...';
+    document.getElementById('alert-l').classList.add('hidden');
+    try {
+      const r = await fetch('/auth/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email: document.getElementById('l-email').value, password: document.getElementById('l-pass').value }) });
+      const d = await r.json();
+      if (!r.ok) { err('alert-l', d.detail || 'Login failed'); return; }
+      localStorage.setItem('access_token', d.access_token);
+      localStorage.setItem('refresh_token', d.refresh_token);
+      location.href = '/ui/app';
+    } catch { err('alert-l', 'Network error'); }
+    finally { btn.disabled = false; btn.textContent = 'Sign In'; }
+  }
+
+  async function doRegister() {
+    const btn = document.getElementById('r-btn');
+    btn.disabled = true; btn.textContent = 'Creating...';
+    document.getElementById('alert-r').classList.add('hidden');
+    try {
+      const r = await fetch('/auth/register', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ full_name: document.getElementById('r-name').value, email: document.getElementById('r-email').value, password: document.getElementById('r-pass').value }) });
+      const d = await r.json();
+      if (!r.ok) { err('alert-r', d.detail || 'Registration failed'); return; }
+      localStorage.setItem('access_token', d.access_token);
+      localStorage.setItem('refresh_token', d.refresh_token);
+      location.href = '/ui/app';
+    } catch { err('alert-r', 'Network error'); }
+    finally { btn.disabled = false; btn.textContent = 'Create Account'; }
+  }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      document.getElementById('login-view').classList.contains('hidden') ? doRegister() : doLogin();
+    }
+  });
+</script>
+</body>
+</html>

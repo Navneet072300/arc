@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ServerlessDB — Billing</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f0f0f;
+      --surface: #1c1c1c;
+      --surface2: #222;
+      --border: #2a2a2a;
+      --green: #3ecf8e;
+      --green-dim: rgba(62,207,142,.1);
+      --text: #ededed;
+      --muted: #8c8c8c;
+      --danger: #e55353;
+      --warning: #f59e0b;
+      --radius: 6px;
+      --sidebar: 220px;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; }
+    .sidebar { width: var(--sidebar); background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: fixed; top: 0; left: 0; height: 100vh; }
+    .sidebar-logo { display: flex; align-items: center; gap: 9px; padding: 18px 16px; border-bottom: 1px solid var(--border); }
+    .sidebar-logo svg { color: var(--green); }
+    .sidebar-logo-text { font-size: .95rem; font-weight: 700; }
+    .sidebar-nav { flex: 1; padding: 12px 8px; }
+    .nav-section { font-size: .7rem; color: var(--muted); letter-spacing: .08em; padding: 12px 8px 6px; text-transform: uppercase; }
+    .nav-item { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: var(--radius); font-size: .85rem; color: var(--muted); cursor: pointer; text-decoration: none; transition: background .1s, color .1s; }
+    .nav-item:hover { background: var(--surface2); color: var(--text); }
+    .nav-item.active { background: var(--green-dim); color: var(--green); }
+    .nav-item svg { flex-shrink: 0; }
+    .sidebar-footer { padding: 12px 8px; border-top: 1px solid var(--border); }
+    .user-row { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: var(--radius); cursor: pointer; }
+    .user-row:hover { background: var(--surface2); }
+    .avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--green-dim); border: 1px solid var(--green); display: flex; align-items: center; justify-content: center; font-size: .75rem; font-weight: 600; color: var(--green); flex-shrink: 0; }
+    .user-info { flex: 1; min-width: 0; }
+    .user-email { font-size: .78rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sign-out { font-size: .75rem; color: var(--muted); }
+    .main { margin-left: var(--sidebar); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+    .topbar { padding: 16px 28px; border-bottom: 1px solid var(--border); }
+    .page-title { font-size: 1rem; font-weight: 600; }
+    .page-sub { font-size: .8rem; color: var(--muted); margin-top: 2px; }
+    .content { padding: 28px; flex: 1; display: flex; flex-direction: column; gap: 24px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .card-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+    .card-title { font-size: .9rem; font-weight: 600; }
+    .controls { display: flex; gap: 8px; }
+    select { padding: 6px 10px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: .8rem; outline: none; cursor: pointer; }
+    select:focus { border-color: var(--green); }
+    .chart-wrap { padding: 20px; }
+    table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    th { text-align: left; color: var(--muted); font-weight: 500; padding: 10px 20px; border-bottom: 1px solid var(--border); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; }
+    td { padding: 13px 20px; border-bottom: 1px solid var(--border); }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,.015); }
+    .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 999px; font-size: .72rem; font-weight: 600; }
+    .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .badge-draft { background: rgba(245,158,11,.12); color: var(--warning); }
+    .badge-finalized { background: rgba(62,207,142,.12); color: var(--green); }
+    .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding: 20px; }
+    .stat { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+    .stat-label { font-size: .75rem; color: var(--muted); margin-bottom: 6px; }
+    .stat-val { font-size: 1.4rem; font-weight: 700; }
+    .stat-unit { font-size: .75rem; color: var(--muted); margin-left: 4px; font-weight: 400; }
+    .empty { text-align: center; padding: 40px; color: var(--muted); font-size: .875rem; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-logo">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>
+    </svg>
+    <span class="sidebar-logo-text">ServerlessDB</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-section">Project</div>
+    <a class="nav-item" href="/ui/app">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+      Database
+    </a>
+    <a class="nav-item active" href="/ui/billing">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+      Billing
+    </a>
+  </nav>
+  <div class="sidebar-footer">
+    <div class="user-row" onclick="doLogout()">
+      <div class="avatar" id="avatar-initials">?</div>
+      <div class="user-info">
+        <div class="user-email" id="user-email">Loading...</div>
+        <div class="sign-out">Sign out</div>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<div class="main">
+  <div class="topbar">
+    <div class="page-title">Billing & Usage</div>
+    <div class="page-sub">Monitor resource consumption and costs</div>
+  </div>
+  <div class="content">
+
+    <!-- Summary stats -->
+    <div class="card">
+      <div class="card-header"><span class="card-title">This month</span></div>
+      <div class="stat-grid">
+        <div class="stat"><div class="stat-label">Total cost</div><div class="stat-val" id="stat-cost">—<span class="stat-unit">USD</span></div></div>
+        <div class="stat"><div class="stat-label">CPU core-hours</div><div class="stat-val" id="stat-cpu">—</div></div>
+        <div class="stat"><div class="stat-label">Memory GB-hours</div><div class="stat-val" id="stat-mem">—</div></div>
+      </div>
+    </div>
+
+    <!-- Usage chart -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Usage (last 30 days)</span>
+        <div class="controls">
+          <select id="inst-select" title="Select instance" onchange="loadChart()"></select>
+          <select id="granularity" title="Select granularity" onchange="loadChart()">
+            <option value="day">Daily</option>
+            <option value="hour">Hourly</option>
+          </select>
+        </div>
+      </div>
+      <div class="chart-wrap"><canvas id="usage-chart" height="70"></canvas></div>
+    </div>
+
+    <!-- Summaries table -->
+    <div class="card">
+      <div class="card-header"><span class="card-title">Monthly summaries</span></div>
+      <div id="summaries-wrap"><div class="empty">Loading...</div></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  if (!localStorage.getItem('access_token')) location.href = '/ui/';
+  let chart = null;
+
+  async function api(path, opts = {}) {
+    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('access_token')}`, ...opts.headers };
+    const r = await fetch(path, { ...opts, headers });
+    if (r.status === 401) { localStorage.clear(); location.href = '/ui/'; return; }
+    if (r.status === 204) return null;
+    return r.json();
+  }
+
+  api('/users/me').then(u => {
+    if (!u) return;
+    document.getElementById('user-email').textContent = u.email;
+    document.getElementById('avatar-initials').textContent = u.full_name ? u.full_name[0].toUpperCase() : u.email[0].toUpperCase();
+  });
+
+  async function init() {
+    const instances = await api('/instances');
+    if (!instances || !instances.length) {
+      document.getElementById('inst-select').innerHTML = '<option>No instances</option>';
+      return;
+    }
+    document.getElementById('inst-select').innerHTML = instances.map(i => `<option value="${i.id}">${i.name}</option>`).join('');
+    await Promise.all([loadChart(), loadSummaries()]);
+  }
+
+  async function loadChart() {
+    const id = document.getElementById('inst-select').value;
+    if (!id || id === 'No instances') return;
+    const gran = document.getElementById('granularity').value;
+    const end = new Date().toISOString().split('T')[0];
+    const s = new Date(); s.setDate(s.getDate() - 30);
+    const start = s.toISOString().split('T')[0];
+    const data = await api(`/billing/usage?instance_id=${id}&start=${start}&end=${end}&granularity=${gran}`);
+    if (!data) return;
+    renderChart(data);
+  }
+
+  function renderChart(data) {
+    const labels = data.data.map(d => d.period.split('T')[0]);
+    const cpu = data.data.map(d => +d.cpu_core_hours.toFixed(4));
+    const mem = data.data.map(d => +d.mem_gb_hours.toFixed(4));
+    const ctx = document.getElementById('usage-chart').getContext('2d');
+    if (chart) chart.destroy();
+    chart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'CPU core-hours', data: cpu, backgroundColor: 'rgba(62,207,142,.6)', borderRadius: 3 },
+          { label: 'Memory GB-hours', data: mem, backgroundColor: 'rgba(99,102,241,.5)', borderRadius: 3 },
+        ],
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { labels: { color: '#8c8c8c', font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { color: '#8c8c8c', font: { size: 10 } }, grid: { color: '#2a2a2a' } },
+          y: { ticks: { color: '#8c8c8c', font: { size: 10 } }, grid: { color: '#2a2a2a' } },
+        },
+      },
+    });
+  }
+
+  async function loadSummaries() {
+    const summaries = await api('/billing/summaries');
+    const wrap = document.getElementById('summaries-wrap');
+    if (!summaries || !summaries.length) { wrap.innerHTML = '<div class="empty">No billing data yet. Usage is recorded every 60 seconds.</div>'; return; }
+
+    // Update stats
+    const thisMonth = summaries[0];
+    document.getElementById('stat-cost').innerHTML = `${(+thisMonth.amount_usd || 0).toFixed(4)}<span class="stat-unit">USD</span>`;
+    document.getElementById('stat-cpu').textContent = (+thisMonth.cpu_core_hours || 0).toFixed(4);
+    document.getElementById('stat-mem').textContent = (+thisMonth.mem_gb_hours || 0).toFixed(4);
+
+    wrap.innerHTML = `<table>
+      <thead><tr><th>Period</th><th>CPU core-hrs</th><th>Mem GB-hrs</th><th>Storage GB-days</th><th>Amount</th><th>Status</th></tr></thead>
+      <tbody>${summaries.map(s => `<tr>
+        <td>${s.period_start} → ${s.period_end}</td>
+        <td>${(+s.cpu_core_hours || 0).toFixed(4)}</td>
+        <td>${(+s.mem_gb_hours || 0).toFixed(4)}</td>
+        <td>${(+s.storage_gb_days || 0).toFixed(4)}</td>
+        <td>$${(+s.amount_usd || 0).toFixed(4)}</td>
+        <td><span class="badge badge-${s.status}">${s.status}</span></td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  }
+
+  function doLogout() {
+    const rt = localStorage.getItem('refresh_token');
+    if (rt) fetch('/auth/logout', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({refresh_token: rt}) }).catch(() => {});
+    localStorage.clear();
+    location.href = '/ui/';
+  }
+
+  init();
+</script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: serverless-pg-api
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: serverless-pg-api
+  template:
+    metadata:
+      labels:
+        app: serverless-pg-api
+    spec:
+      serviceAccountName: serverless-pg-api
+      containers:
+        - name: api
+          image: serverless-pg-api:latest   # built locally or pushed to ECR
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: serverless-pg-api-env
+          env:
+            - name: K8S_IN_CLUSTER
+              value: "true"
+            - name: ENVIRONMENT
+              value: "dev"     # change to "prod" for EKS
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: serverless-pg-api
+  namespace: default
+spec:
+  selector:
+    app: serverless-pg-api
+  ports:
+    - port: 80
+      targetPort: 8000
+  type: ClusterIP
