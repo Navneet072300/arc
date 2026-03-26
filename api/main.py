@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from api.admin.router import router as admin_router
 from api.auth.router import router as auth_router
 from api.billing.router import router as billing_router
 from api.config import settings
@@ -67,6 +68,7 @@ app.add_middleware(
 )
 
 # API routers
+app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(instances_router)
