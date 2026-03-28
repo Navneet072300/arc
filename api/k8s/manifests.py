@@ -12,6 +12,8 @@ from api.config import settings
 if TYPE_CHECKING:
     from api.db.models.instance import Instance
 
+PGBOUNCER_PORT = 6432
+
 
 def namespace_manifest(instance: Instance) -> dict:
     return {
@@ -65,6 +67,16 @@ def pvc_manifest(instance: Instance) -> dict:
 
 
 def statefulset_manifest(instance: Instance) -> dict:
+    """
+    StatefulSet with two containers:
+      - postgres: the actual PostgreSQL server on port 5432 (not exposed externally)
+      - pgbouncer: lightweight connection pooler on port 6432, proxies to localhost:5432
+    Users always connect through PgBouncer.
+    """
+    pool_mode = getattr(instance, "pool_mode", "transaction")
+    pool_size = getattr(instance, "pool_size", 20)
+    max_client_conn = getattr(instance, "max_client_conn", 100)
+
     return {
         "apiVersion": "apps/v1",
         "kind": "StatefulSet",
@@ -80,10 +92,11 @@ def statefulset_manifest(instance: Instance) -> dict:
                 "metadata": {"labels": {"app": instance.k8s_statefulset}},
                 "spec": {
                     "containers": [
+                        # ── PostgreSQL ──────────────────────────────────────
                         {
                             "name": "postgres",
                             "image": f"postgres:{instance.pg_version}-alpine",
-                            "ports": [{"containerPort": 5432}],
+                            "ports": [{"containerPort": 5432, "name": "postgres"}],
                             "envFrom": [{"secretRef": {"name": instance.k8s_secret_name}}],
                             "resources": {
                                 "requests": {
@@ -105,10 +118,8 @@ def statefulset_manifest(instance: Instance) -> dict:
                                 "exec": {
                                     "command": [
                                         "pg_isready",
-                                        "-U",
-                                        instance.pg_username,
-                                        "-d",
-                                        instance.pg_db_name,
+                                        "-U", instance.pg_username,
+                                        "-d", instance.pg_db_name,
                                     ]
                                 },
                                 "initialDelaySeconds": 10,
@@ -119,16 +130,60 @@ def statefulset_manifest(instance: Instance) -> dict:
                                 "exec": {
                                     "command": [
                                         "pg_isready",
-                                        "-U",
-                                        instance.pg_username,
-                                        "-d",
-                                        instance.pg_db_name,
+                                        "-U", instance.pg_username,
+                                        "-d", instance.pg_db_name,
                                     ]
                                 },
                                 "initialDelaySeconds": 30,
                                 "periodSeconds": 10,
                             },
-                        }
+                        },
+                        # ── PgBouncer sidecar ───────────────────────────────
+                        {
+                            "name": "pgbouncer",
+                            "image": "bitnami/pgbouncer:latest",
+                            "ports": [{"containerPort": PGBOUNCER_PORT, "name": "pgbouncer"}],
+                            "env": [
+                                # Where PgBouncer connects to (same pod, loopback)
+                                {"name": "POSTGRESQL_HOST", "value": "localhost"},
+                                {"name": "POSTGRESQL_PORT", "value": "5432"},
+                                # Credentials from the same Secret
+                                {
+                                    "name": "POSTGRESQL_USERNAME",
+                                    "valueFrom": {"secretKeyRef": {"name": instance.k8s_secret_name, "key": "POSTGRES_USER"}},
+                                },
+                                {
+                                    "name": "POSTGRESQL_PASSWORD",
+                                    "valueFrom": {"secretKeyRef": {"name": instance.k8s_secret_name, "key": "POSTGRES_PASSWORD"}},
+                                },
+                                {
+                                    "name": "POSTGRESQL_DATABASE",
+                                    "valueFrom": {"secretKeyRef": {"name": instance.k8s_secret_name, "key": "POSTGRES_DB"}},
+                                },
+                                # PgBouncer tuning
+                                {"name": "PGBOUNCER_PORT", "value": str(PGBOUNCER_PORT)},
+                                {"name": "PGBOUNCER_POOL_MODE", "value": pool_mode},
+                                {"name": "PGBOUNCER_DEFAULT_POOL_SIZE", "value": str(pool_size)},
+                                {"name": "PGBOUNCER_MAX_CLIENT_CONN", "value": str(max_client_conn)},
+                                # Required by bitnami image
+                                {"name": "PGBOUNCER_AUTH_TYPE", "value": "md5"},
+                                {"name": "PGBOUNCER_IGNORE_STARTUP_PARAMETERS", "value": "extra_float_digits"},
+                            ],
+                            "resources": {
+                                "requests": {"cpu": "50m", "memory": "32Mi"},
+                                "limits": {"cpu": "200m", "memory": "64Mi"},
+                            },
+                            "readinessProbe": {
+                                "tcpSocket": {"port": PGBOUNCER_PORT},
+                                "initialDelaySeconds": 5,
+                                "periodSeconds": 5,
+                            },
+                            "livenessProbe": {
+                                "tcpSocket": {"port": PGBOUNCER_PORT},
+                                "initialDelaySeconds": 15,
+                                "periodSeconds": 10,
+                            },
+                        },
                     ],
                     "volumes": [
                         {
@@ -143,6 +198,7 @@ def statefulset_manifest(instance: Instance) -> dict:
 
 
 def clusterip_service_manifest(instance: Instance) -> dict:
+    """Internal service exposes both postgres (5432) and pgbouncer (6432)."""
     return {
         "apiVersion": "v1",
         "kind": "Service",
@@ -152,13 +208,20 @@ def clusterip_service_manifest(instance: Instance) -> dict:
         },
         "spec": {
             "selector": {"app": instance.k8s_statefulset},
-            "ports": [{"port": 5432, "targetPort": 5432}],
+            "ports": [
+                {"name": "postgres", "port": 5432, "targetPort": 5432},
+                {"name": "pgbouncer", "port": PGBOUNCER_PORT, "targetPort": PGBOUNCER_PORT},
+            ],
             "type": "ClusterIP",
         },
     }
 
 
 def external_service_manifest(instance: Instance) -> dict:
+    """
+    External service routes to PgBouncer (6432) — users always go through the pooler.
+    PostgreSQL port 5432 is never exposed externally.
+    """
     svc_type = "LoadBalancer" if settings.ENVIRONMENT == "prod" else "NodePort"
     return {
         "apiVersion": "v1",
@@ -166,10 +229,21 @@ def external_service_manifest(instance: Instance) -> dict:
         "metadata": {
             "name": f"pg-{instance.slug}-external",
             "namespace": instance.k8s_namespace,
+            "annotations": {
+                "arc.io/pool-mode": getattr(instance, "pool_mode", "transaction"),
+                "arc.io/pool-size": str(getattr(instance, "pool_size", 20)),
+            },
         },
         "spec": {
             "selector": {"app": instance.k8s_statefulset},
-            "ports": [{"port": 5432, "targetPort": 5432, "protocol": "TCP"}],
+            "ports": [
+                {
+                    "name": "pgbouncer",
+                    "port": PGBOUNCER_PORT,
+                    "targetPort": PGBOUNCER_PORT,
+                    "protocol": "TCP",
+                }
+            ],
             "type": svc_type,
         },
     }

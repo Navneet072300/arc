@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
@@ -14,6 +15,10 @@ class CreateInstanceRequest(BaseModel):
     storage_size: str = "5Gi"
     pg_db_name: str = "postgres"
     pg_username: str = "pguser"
+    # PgBouncer pooling
+    pool_mode: Literal["transaction", "session", "statement"] = "transaction"
+    pool_size: int = 20
+    max_client_conn: int = 100
 
     @field_validator("name")
     @classmethod
@@ -22,6 +27,21 @@ class CreateInstanceRequest(BaseModel):
         if not re.match(r"^[a-z0-9][a-z0-9\-]{0,30}[a-z0-9]$", v):
             raise ValueError("name must be lowercase alphanumeric and hyphens, 2-32 chars")
         return v
+
+    @field_validator("pool_size")
+    @classmethod
+    def pool_size_range(cls, v: int) -> int:
+        if not 1 <= v <= 200:
+            raise ValueError("pool_size must be between 1 and 200")
+        return v
+
+
+class PoolingInfo(BaseModel):
+    mode: str
+    pool_size: int
+    max_client_conn: int
+
+    model_config = {"from_attributes": True}
 
 
 class InstanceResponse(BaseModel):
@@ -37,6 +57,9 @@ class InstanceResponse(BaseModel):
     cpu_request: str
     mem_request: str
     storage_size: str
+    pool_mode: str
+    pool_size: int
+    max_client_conn: int
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -47,7 +70,7 @@ class InstanceDetailResponse(InstanceResponse):
 
 
 class InstanceCreatedResponse(InstanceDetailResponse):
-    password: str | None = None  # Only returned once at creation
+    password: str | None = None  # shown once at creation
 
 
 class CredentialsRotateResponse(BaseModel):

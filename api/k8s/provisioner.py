@@ -12,6 +12,7 @@ from kubernetes.client.rest import ApiException
 
 from api.k8s import manifests
 from api.k8s.exceptions import K8sNotFoundError, K8sProvisioningError
+from api.k8s.manifests import PGBOUNCER_PORT
 
 if TYPE_CHECKING:
     from api.db.models.instance import Instance
@@ -146,14 +147,18 @@ async def get_service_endpoint(api_client: client.ApiClient, instance: Instance)
         return None
 
     spec = svc.spec
+    # Find the pgbouncer port entry (port 6432); fall back to first port
+    pgb_port_entry = next((p for p in (spec.ports or []) if p.port == PGBOUNCER_PORT), None)
+    port_entry = pgb_port_entry or (spec.ports[0] if spec.ports else None)
+    if not port_entry:
+        return None
+
     if spec.type == "NodePort":
-        # For minikube, use the minikube IP
-        node_port = spec.ports[0].node_port if spec.ports else None
+        node_port = port_entry.node_port
         if not node_port:
             return None
         try:
             import subprocess
-
             result = subprocess.run(["minikube", "ip"], capture_output=True, text=True, timeout=5)
             host = result.stdout.strip() if result.returncode == 0 else "localhost"
         except Exception:
@@ -161,14 +166,12 @@ async def get_service_endpoint(api_client: client.ApiClient, instance: Instance)
         return host, node_port
 
     elif spec.type == "LoadBalancer":
-        status = svc.status
-        ingress = status.load_balancer.ingress if status and status.load_balancer else None
+        ingress = svc.status.load_balancer.ingress if svc.status and svc.status.load_balancer else None
         if ingress:
             entry = ingress[0]
             host = entry.hostname or entry.ip
-            port = spec.ports[0].port if spec.ports else 5432
             if host:
-                return host, port
+                return host, port_entry.port
     return None
 
 

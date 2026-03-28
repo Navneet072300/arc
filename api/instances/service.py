@@ -102,6 +102,9 @@ async def create_instance(
         storage_size=data.get("storage_size", "5Gi"),
         pg_db_name=data.get("pg_db_name", "postgres"),
         pg_username=pg_username,
+        pool_mode=data.get("pool_mode", "transaction"),
+        pool_size=data.get("pool_size", 20),
+        max_client_conn=data.get("max_client_conn", 100),
     )
     db.add(instance)
     await db.commit()

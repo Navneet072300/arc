@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import { Plus, RefreshCw, Trash2, KeyRound, Database } from "lucide-react"
+import { Plus, RefreshCw, Trash2, KeyRound, Database, Layers } from "lucide-react"
 
 import { apiFetch } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -39,6 +39,9 @@ export default function InstancesPage() {
     pg_db_name: "postgres",
     pg_username: "pguser",
     storage_size: "5Gi",
+    pool_mode: "transaction",
+    pool_size: "20",
+    max_client_conn: "100",
   })
   const [createError, setCreateError] = useState("")
 
@@ -158,7 +161,7 @@ export default function InstancesPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold tracking-tight text-zinc-100">PostgreSQL Instances</h1>
         <Button onClick={() => {
-            setFormData({ name: "", pg_version: "16", pg_db_name: "postgres", pg_username: "pguser", storage_size: "5Gi" })
+            setFormData({ name: "", pg_version: "16", pg_db_name: "postgres", pg_username: "pguser", storage_size: "5Gi", pool_mode: "transaction", pool_size: "20", max_client_conn: "100" })
             setCreateError("")
             setCreateOpen(true)
         }}>
@@ -191,6 +194,7 @@ export default function InstancesPage() {
                   <TableHead className="text-zinc-300">Version</TableHead>
                   <TableHead className="text-zinc-300">Host</TableHead>
                   <TableHead className="text-zinc-300">Port</TableHead>
+                  <TableHead className="text-zinc-300">Pooling</TableHead>
                   <TableHead className="text-zinc-300">Created</TableHead>
                   <TableHead className="text-right text-zinc-300">Actions</TableHead>
                 </TableRow>
@@ -213,6 +217,13 @@ export default function InstancesPage() {
                       <TableCell className="text-zinc-300">PG {i.pg_version}</TableCell>
                       <TableCell className="font-mono text-sm text-zinc-400">{i.external_host || "—"}</TableCell>
                       <TableCell className="font-mono text-sm text-zinc-400">{i.external_port || "—"}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          <Layers className="h-3 w-3 text-zinc-500" />
+                          <span className="text-xs text-zinc-400 font-mono">{(i as any).pool_mode ?? "txn"}</span>
+                          <span className="text-xs text-zinc-600">/{(i as any).pool_size ?? 20}</span>
+                        </div>
+                      </TableCell>
                       <TableCell className="text-zinc-400 text-sm">
                         {new Date(i.created_at).toLocaleDateString()}
                       </TableCell>
@@ -303,6 +314,46 @@ export default function InstancesPage() {
                   <SelectItem value="20Gi">20 GiB</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+            {/* PgBouncer pooling */}
+            <div className="border-t border-zinc-800 pt-4 grid gap-4">
+              <p className="text-xs text-zinc-500 font-medium flex items-center gap-1 uppercase tracking-wider">
+                <Layers className="h-3 w-3" /> Connection Pooling (PgBouncer)
+              </p>
+              <div className="grid gap-2">
+                <Label>Pool Mode</Label>
+                <Select value={formData.pool_mode} onValueChange={(v) => setFormData({ ...formData, pool_mode: v || "transaction" })}>
+                  <SelectTrigger className="bg-zinc-900/50 border-zinc-800">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="bg-zinc-900 border-zinc-800">
+                    <SelectItem value="transaction">Transaction (recommended)</SelectItem>
+                    <SelectItem value="session">Session</SelectItem>
+                    <SelectItem value="statement">Statement</SelectItem>
+                  </SelectContent>
+                </Select>
+                <span className="text-xs text-zinc-500">Transaction mode is best for serverless workloads.</span>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="grid gap-2">
+                  <Label>Pool Size</Label>
+                  <Input
+                    type="number" min={1} max={200}
+                    value={formData.pool_size}
+                    onChange={(e) => setFormData({ ...formData, pool_size: e.target.value })}
+                    className="bg-zinc-900/50 border-zinc-800"
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Max Client Connections</Label>
+                  <Input
+                    type="number" min={1} max={10000}
+                    value={formData.max_client_conn}
+                    onChange={(e) => setFormData({ ...formData, max_client_conn: e.target.value })}
+                    className="bg-zinc-900/50 border-zinc-800"
+                  />
+                </div>
+              </div>
             </div>
           </div>
           <DialogFooter>

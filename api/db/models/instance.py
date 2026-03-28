@@ -33,6 +33,10 @@ class Instance(Base):
     k8s_secret_name: Mapped[str] = mapped_column(Text, nullable=False)
     external_host: Mapped[str | None] = mapped_column(Text)
     external_port: Mapped[int | None] = mapped_column(Integer)
+    # PgBouncer connection pooling
+    pool_mode: Mapped[str] = mapped_column(Text, default="transaction")   # transaction | session | statement
+    pool_size: Mapped[int] = mapped_column(Integer, default=20)
+    max_client_conn: Mapped[int] = mapped_column(Integer, default=100)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
