@@ -22,5 +22,10 @@ class Settings(BaseSettings):
     # Metering
     METERING_INTERVAL_SECS: int = 60
 
+    # Scale-to-zero
+    SCALE_TO_ZERO_ENABLED: bool = True
+    SCALE_TO_ZERO_CHECK_INTERVAL_SECS: int = 300   # check every 5 min
+    SCALE_TO_ZERO_IDLE_MINUTES: int = 30           # suspend after 30 min idle
+
 
 settings = Settings()

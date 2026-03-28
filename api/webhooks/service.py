@@ -30,6 +30,7 @@ BACKOFF = [0, 5, 25, 125]  # seconds before each retry
 ALL_EVENTS = [
     "instance.provisioning",
     "instance.running",
+    "instance.suspended",
     "instance.error",
     "instance.deleted",
     "credentials.rotated",

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import { Plus, RefreshCw, Trash2, KeyRound, Database, Layers } from "lucide-react"
+import { Plus, RefreshCw, Trash2, KeyRound, Database, Layers, Pause, Play } from "lucide-react"
 
 import { apiFetch } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -22,6 +22,11 @@ interface Instance {
   pg_version: string
   external_host: string | null
   external_port: number | null
+  pool_mode: string
+  pool_size: number
+  auto_suspend: boolean
+  idle_timeout_minutes: number
+  suspended_at: string | null
   created_at: string
 }
 
@@ -42,6 +47,8 @@ export default function InstancesPage() {
     pool_mode: "transaction",
     pool_size: "20",
     max_client_conn: "100",
+    auto_suspend: true,
+    idle_timeout_minutes: "30",
   })
   const [createError, setCreateError] = useState("")
 
@@ -130,6 +137,25 @@ export default function InstancesPage() {
     }
   }
 
+  const handleSuspend = async (id: string, name: string) => {
+    if (!window.confirm(`Suspend "${name}"? The instance will scale to zero and connections will be dropped.`)) return
+    try {
+      await apiFetch(`/instances/${id}/suspend`, { method: "POST" })
+      loadInstances()
+    } catch (err: any) {
+      alert(err.detail || "Suspend failed")
+    }
+  }
+
+  const handleResume = async (id: string) => {
+    try {
+      await apiFetch(`/instances/${id}/resume`, { method: "POST" })
+      loadInstances()
+    } catch (err: any) {
+      alert(err.detail || "Resume failed")
+    }
+  }
+
   const handleRotate = async (id: string) => {
     if (!window.confirm("Rotate credentials? The database will restart briefly.")) return
     try {
@@ -152,6 +178,8 @@ export default function InstancesPage() {
       case "running": return <Badge className="bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 shadow-none border border-emerald-500/20">{status}</Badge>
       case "provisioning": return <Badge className="bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 shadow-none border border-amber-500/20">{status}</Badge>
       case "deleting": return <Badge className="bg-destructive/10 text-destructive hover:bg-destructive/20 shadow-none border border-destructive/20">{status}</Badge>
+      case "suspended": return <Badge className="bg-violet-500/10 text-violet-400 hover:bg-violet-500/20 shadow-none border border-violet-500/20">{status}</Badge>
+      case "error": return <Badge className="bg-destructive/10 text-destructive hover:bg-destructive/20 shadow-none border border-destructive/20">{status}</Badge>
       default: return <Badge variant="secondary">{status}</Badge>
     }
   }
@@ -161,7 +189,7 @@ export default function InstancesPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold tracking-tight text-zinc-100">PostgreSQL Instances</h1>
         <Button onClick={() => {
-            setFormData({ name: "", pg_version: "16", pg_db_name: "postgres", pg_username: "pguser", storage_size: "5Gi", pool_mode: "transaction", pool_size: "20", max_client_conn: "100" })
+            setFormData({ name: "", pg_version: "16", pg_db_name: "postgres", pg_username: "pguser", storage_size: "5Gi", pool_mode: "transaction", pool_size: "20", max_client_conn: "100", auto_suspend: true, idle_timeout_minutes: "30" })
             setCreateError("")
             setCreateOpen(true)
         }}>
@@ -229,6 +257,16 @@ export default function InstancesPage() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
+                          {i.status === "running" && (
+                            <Button variant="outline" size="sm" onClick={() => handleSuspend(i.id, i.name)} title="Suspend" className="border-violet-500/20 hover:bg-violet-500/10 hover:text-violet-400 text-zinc-400">
+                              <Pause className="h-4 w-4" />
+                            </Button>
+                          )}
+                          {i.status === "suspended" && (
+                            <Button variant="outline" size="sm" onClick={() => handleResume(i.id)} title="Resume" className="border-emerald-500/20 hover:bg-emerald-500/10 hover:text-emerald-400 text-zinc-400">
+                              <Play className="h-4 w-4" />
+                            </Button>
+                          )}
                           {i.status === "running" && (
                             <Button variant="outline" size="sm" onClick={() => handleRotate(i.id)} className="border-amber-500/20 hover:bg-amber-500/10 hover:text-amber-500 text-zinc-400">
                               <KeyRound className="h-4 w-4" />
@@ -354,6 +392,38 @@ export default function InstancesPage() {
                   />
                 </div>
               </div>
+            </div>
+            {/* Scale-to-zero */}
+            <div className="border-t border-zinc-800 pt-4 grid gap-3">
+              <p className="text-xs text-zinc-500 font-medium flex items-center gap-1 uppercase tracking-wider">
+                <Pause className="h-3 w-3" /> Scale-to-Zero
+              </p>
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label className="text-sm">Auto-suspend when idle</Label>
+                  <p className="text-xs text-zinc-500 mt-0.5">Scales to zero replicas after idle timeout</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFormData({ ...formData, auto_suspend: !formData.auto_suspend })}
+                  aria-label="Toggle auto-suspend"
+                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${formData.auto_suspend ? "bg-emerald-500" : "bg-zinc-700"}`}
+                >
+                  <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${formData.auto_suspend ? "translate-x-5" : "translate-x-1"}`} />
+                </button>
+              </div>
+              {formData.auto_suspend && (
+                <div className="grid gap-2">
+                  <Label>Idle timeout (minutes)</Label>
+                  <Input
+                    type="number" min={5} max={1440}
+                    value={formData.idle_timeout_minutes}
+                    onChange={(e) => setFormData({ ...formData, idle_timeout_minutes: e.target.value })}
+                    className="bg-zinc-900/50 border-zinc-800"
+                  />
+                  <span className="text-xs text-zinc-500">Suspend after this many minutes of near-zero CPU.</span>
+                </div>
+              )}
             </div>
           </div>
           <DialogFooter>

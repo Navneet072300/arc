@@ -60,6 +60,9 @@ class InstanceResponse(BaseModel):
     pool_mode: str
     pool_size: int
     max_client_conn: int
+    auto_suspend: bool
+    idle_timeout_minutes: int
+    suspended_at: datetime | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

@@ -150,6 +150,75 @@ async def aggregate_billing() -> None:
             logger.info("Billing summary updated for instance %s on %s", instance.slug, yesterday)
 
 
+async def check_idle_instances() -> None:
+    """Suspend running instances that have been idle longer than their idle_timeout_minutes."""
+    if not settings.SCALE_TO_ZERO_ENABLED:
+        return
+
+    from datetime import timezone
+
+    from sqlalchemy import func
+
+    from api.db.models.usage_record import UsageRecord
+    from api.k8s.client import get_k8s_client
+    from api.k8s.provisioner import scale_instance
+
+    now = datetime.now(tz=timezone.utc)
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Instance).where(
+                Instance.status == "running",
+                Instance.auto_suspend.is_(True),
+            )
+        )
+        instances = list(result.scalars())
+
+    api_client = get_k8s_client()
+
+    for instance in instances:
+        idle_threshold = timedelta(minutes=instance.idle_timeout_minutes)
+        window_start = now - idle_threshold
+
+        async with AsyncSessionLocal() as db:
+            agg = await db.execute(
+                select(func.max(UsageRecord.cpu_millicores)).where(
+                    UsageRecord.instance_id == instance.id,
+                    UsageRecord.recorded_at >= window_start,
+                )
+            )
+            max_cpu = agg.scalar() or 0.0
+
+        # Instance is idle if max CPU in the window is near zero
+        if max_cpu < 1.0:  # < 1 millicores
+            logger.info(
+                "Instance %s idle for >%d min (max_cpu=%.2fm) — suspending",
+                instance.slug,
+                instance.idle_timeout_minutes,
+                max_cpu,
+            )
+            try:
+                await scale_instance(api_client, instance, replicas=0)
+                async with AsyncSessionLocal() as db:
+                    inst = await db.get(Instance, instance.id)
+                    if inst:
+                        inst.status = "suspended"
+                        inst.suspended_at = now
+                        await db.commit()
+                from api.webhooks.service import dispatch_event
+                await dispatch_event(
+                    "instance.suspended",
+                    {
+                        "instance_id": str(instance.id),
+                        "slug": instance.slug,
+                        "suspended_at": now.isoformat(),
+                    },
+                    instance.user_id,
+                )
+            except Exception as exc:
+                logger.error("Failed to suspend %s: %s", instance.slug, exc)
+
+
 def _parse_cpu(cpu_str: str) -> float:
     """Parse k8s CPU string to millicores. e.g. '250m' -> 250.0, '0.5' -> 500.0"""
     if cpu_str.endswith("n"):

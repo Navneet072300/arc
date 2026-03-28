@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -34,9 +34,13 @@ class Instance(Base):
     external_host: Mapped[str | None] = mapped_column(Text)
     external_port: Mapped[int | None] = mapped_column(Integer)
     # PgBouncer connection pooling
-    pool_mode: Mapped[str] = mapped_column(Text, default="transaction")   # transaction | session | statement
+    pool_mode: Mapped[str] = mapped_column(Text, default="transaction")
     pool_size: Mapped[int] = mapped_column(Integer, default=20)
     max_client_conn: Mapped[int] = mapped_column(Integer, default=100)
+    # Scale-to-zero
+    auto_suspend: Mapped[bool] = mapped_column(Boolean, default=True)
+    idle_timeout_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

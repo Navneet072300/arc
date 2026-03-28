@@ -175,6 +175,24 @@ async def get_service_endpoint(api_client: client.ApiClient, instance: Instance)
     return None
 
 
+async def scale_instance(api_client: client.ApiClient, instance: Instance, replicas: int) -> None:
+    """Scale the StatefulSet to the given number of replicas (0 = suspended, 1 = running)."""
+    loop = asyncio.get_event_loop()
+    apps = _apps(api_client)
+    try:
+        await loop.run_in_executor(
+            None,
+            lambda: apps.patch_namespaced_stateful_set(
+                name=instance.k8s_statefulset,
+                namespace=instance.k8s_namespace,
+                body={"spec": {"replicas": replicas}},
+            ),
+        )
+        logger.info("Scaled %s to %d replicas", instance.slug, replicas)
+    except ApiException as exc:
+        raise K8sProvisioningError(str(exc)) from exc
+
+
 async def rotate_password(api_client: client.ApiClient, instance: Instance, new_password: str) -> None:
     """Patch the K8s Secret with a new password and trigger a StatefulSet rollout."""
     import base64

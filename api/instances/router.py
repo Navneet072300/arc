@@ -108,6 +108,38 @@ async def delete_instance(
     return {"detail": "Deletion initiated", "id": str(instance_id)}
 
 
+@router.post("/{instance_id}/suspend", status_code=status.HTTP_200_OK)
+async def suspend_instance(
+    instance_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    instance = await service.get_instance(db, current_user.id, instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    if instance.status != "running":
+        raise HTTPException(status_code=400, detail="Only running instances can be suspended")
+    api_client = get_k8s_client()
+    await service.suspend_instance(db, api_client, instance)
+    return {"detail": "Instance suspended", "id": str(instance_id)}
+
+
+@router.post("/{instance_id}/resume", status_code=status.HTTP_200_OK)
+async def resume_instance(
+    instance_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    instance = await service.get_instance(db, current_user.id, instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    if instance.status != "suspended":
+        raise HTTPException(status_code=400, detail="Only suspended instances can be resumed")
+    api_client = get_k8s_client()
+    await service.resume_instance(db, api_client, instance)
+    return {"detail": "Instance resumed", "id": str(instance_id)}
+
+
 @router.post("/{instance_id}/credentials/rotate", response_model=schemas.CredentialsRotateResponse)
 async def rotate_credentials(
     instance_id: uuid.UUID,

@@ -13,7 +13,7 @@ from api.config import settings
 from api.db.session import engine
 from api.instances.router import router as instances_router
 from api.k8s.client import get_k8s_client
-from api.metering.collector import aggregate_billing, collect_usage
+from api.metering.collector import aggregate_billing, check_idle_instances, collect_usage
 from api.users.router import router as users_router
 from api.webhooks.router import router as webhooks_router
 
@@ -44,6 +44,12 @@ async def lifespan(app: FastAPI):
     # Start metering scheduler
     scheduler.add_job(collect_usage, "interval", seconds=settings.METERING_INTERVAL_SECS, id="collect_usage")
     scheduler.add_job(aggregate_billing, "cron", hour=2, minute=0, id="aggregate_billing")
+    scheduler.add_job(
+        check_idle_instances,
+        "interval",
+        seconds=settings.SCALE_TO_ZERO_CHECK_INTERVAL_SECS,
+        id="check_idle_instances",
+    )
     scheduler.start()
     logger.info("Metering scheduler started (interval=%ss)", settings.METERING_INTERVAL_SECS)
 

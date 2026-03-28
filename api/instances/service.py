@@ -165,6 +165,40 @@ async def delete_instance(
     await dispatch_event("instance.deleted", _instance_payload(instance), instance.user_id)
 
 
+async def suspend_instance(
+    db: AsyncSession,
+    api_client: k8s_client.ApiClient,
+    instance: Instance,
+) -> None:
+    """Manually suspend (scale to 0) a running instance."""
+    from datetime import UTC, datetime
+
+    await provisioner.scale_instance(api_client, instance, replicas=0)
+    instance.status = "suspended"
+    instance.suspended_at = datetime.now(tz=UTC)
+    await db.commit()
+    await db.refresh(instance)
+    await dispatch_event(
+        "instance.suspended",
+        {**_instance_payload(instance), "suspended_at": instance.suspended_at.isoformat()},
+        instance.user_id,
+    )
+
+
+async def resume_instance(
+    db: AsyncSession,
+    api_client: k8s_client.ApiClient,
+    instance: Instance,
+) -> None:
+    """Resume a suspended instance (scale back to 1 replica)."""
+    await provisioner.scale_instance(api_client, instance, replicas=1)
+    instance.status = "running"
+    instance.suspended_at = None
+    await db.commit()
+    await db.refresh(instance)
+    await dispatch_event("instance.running", _instance_payload(instance), instance.user_id)
+
+
 async def rotate_credentials(
     db: AsyncSession,
     api_client: k8s_client.ApiClient,
