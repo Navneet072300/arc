@@ -28,7 +28,12 @@ def _apps(api_client: client.ApiClient) -> client.AppsV1Api:
     return client.AppsV1Api(api_client)
 
 
-async def provision_instance(api_client: client.ApiClient, instance: Instance, password: str) -> None:
+async def provision_instance(
+    api_client: client.ApiClient,
+    instance: Instance,
+    password: str,
+    replication_password: str = "",
+) -> None:
     """Create all K8s resources for a new instance. Raises K8sProvisioningError on failure."""
     loop = asyncio.get_event_loop()
     core = _core(api_client)
@@ -42,17 +47,27 @@ async def provision_instance(api_client: client.ApiClient, instance: Instance, p
         )
         logger.info("Created namespace %s", instance.k8s_namespace)
 
-        # 2. Secret
+        # 2. Secret (includes replication password)
         await loop.run_in_executor(
             None,
             lambda: core.create_namespaced_secret(
                 namespace=instance.k8s_namespace,
-                body=manifests.secret_manifest(instance, password),
+                body=manifests.secret_manifest(instance, password, replication_password),
             ),
         )
         logger.info("Created secret %s", instance.k8s_secret_name)
 
-        # 3. PVC
+        # 3. ConfigMap with initdb replication script
+        await loop.run_in_executor(
+            None,
+            lambda: core.create_namespaced_config_map(
+                namespace=instance.k8s_namespace,
+                body=manifests.replication_config_manifest(instance),
+            ),
+        )
+        logger.info("Created replication ConfigMap for %s", instance.slug)
+
+        # 4. PVC
         await loop.run_in_executor(
             None,
             lambda: core.create_namespaced_persistent_volume_claim(
@@ -62,7 +77,7 @@ async def provision_instance(api_client: client.ApiClient, instance: Instance, p
         )
         logger.info("Created PVC for %s", instance.slug)
 
-        # 4. StatefulSet
+        # 5. StatefulSet
         await loop.run_in_executor(
             None,
             lambda: apps.create_namespaced_stateful_set(
@@ -72,7 +87,7 @@ async def provision_instance(api_client: client.ApiClient, instance: Instance, p
         )
         logger.info("Created StatefulSet %s", instance.k8s_statefulset)
 
-        # 5. ClusterIP service
+        # 6. ClusterIP service
         await loop.run_in_executor(
             None,
             lambda: core.create_namespaced_service(
@@ -81,7 +96,7 @@ async def provision_instance(api_client: client.ApiClient, instance: Instance, p
             ),
         )
 
-        # 6. External service (NodePort / LoadBalancer)
+        # 7. External service (NodePort / LoadBalancer)
         await loop.run_in_executor(
             None,
             lambda: core.create_namespaced_service(
@@ -99,6 +114,146 @@ async def provision_instance(api_client: client.ApiClient, instance: Instance, p
         except Exception:
             pass
         raise K8sProvisioningError(str(exc)) from exc
+
+
+async def provision_replica(
+    api_client: client.ApiClient,
+    instance: Instance,
+    replica_slug: str,
+) -> None:
+    """Create K8s resources for a read replica in the primary's namespace."""
+    loop = asyncio.get_event_loop()
+    core = _core(api_client)
+    apps = _apps(api_client)
+
+    try:
+        # PVC for replica data
+        await loop.run_in_executor(
+            None,
+            lambda: core.create_namespaced_persistent_volume_claim(
+                namespace=instance.k8s_namespace,
+                body=manifests.replica_pvc_manifest(instance, replica_slug),
+            ),
+        )
+        logger.info("Created replica PVC for %s", replica_slug)
+
+        # Replica StatefulSet (with pg_basebackup init container)
+        await loop.run_in_executor(
+            None,
+            lambda: apps.create_namespaced_stateful_set(
+                namespace=instance.k8s_namespace,
+                body=manifests.replica_statefulset_manifest(instance, replica_slug),
+            ),
+        )
+        logger.info("Created replica StatefulSet pg-%s", replica_slug)
+
+        # External service for replica
+        await loop.run_in_executor(
+            None,
+            lambda: core.create_namespaced_service(
+                namespace=instance.k8s_namespace,
+                body=manifests.replica_service_manifest(instance, replica_slug),
+            ),
+        )
+        logger.info("Created replica service for %s", replica_slug)
+
+    except ApiException as exc:
+        logger.error("K8s API error provisioning replica %s: %s", replica_slug, exc)
+        await deprovision_replica(api_client, instance, replica_slug)
+        raise K8sProvisioningError(str(exc)) from exc
+
+
+async def deprovision_replica(
+    api_client: client.ApiClient,
+    instance: Instance,
+    replica_slug: str,
+) -> None:
+    """Delete replica resources (StatefulSet + PVC + Service)."""
+    loop = asyncio.get_event_loop()
+    core = _core(api_client)
+    apps = _apps(api_client)
+
+    for coro in [
+        lambda: apps.delete_namespaced_stateful_set(
+            name=f"pg-{replica_slug}", namespace=instance.k8s_namespace
+        ),
+        lambda: core.delete_namespaced_service(
+            name=f"pg-{replica_slug}-external", namespace=instance.k8s_namespace
+        ),
+        lambda: core.delete_namespaced_persistent_volume_claim(
+            name=f"pg-data-{replica_slug}", namespace=instance.k8s_namespace
+        ),
+    ]:
+        try:
+            await loop.run_in_executor(None, coro)
+        except ApiException as exc:
+            if exc.status != 404:
+                logger.warning("Error deprovisioning replica resource: %s", exc)
+
+
+async def get_replica_endpoint(
+    api_client: client.ApiClient,
+    instance: Instance,
+    replica_slug: str,
+) -> tuple[str, int] | None:
+    """Return (host, port) for the replica external service, or None if not ready."""
+    loop = asyncio.get_event_loop()
+    core = _core(api_client)
+    svc_name = f"pg-{replica_slug}-external"
+    try:
+        svc = await loop.run_in_executor(
+            None,
+            lambda: core.read_namespaced_service(name=svc_name, namespace=instance.k8s_namespace),
+        )
+    except ApiException:
+        return None
+
+    spec = svc.spec
+    pgb_port_entry = next((p for p in (spec.ports or []) if p.port == PGBOUNCER_PORT), None)
+    port_entry = pgb_port_entry or (spec.ports[0] if spec.ports else None)
+    if not port_entry:
+        return None
+
+    if spec.type == "NodePort":
+        node_port = port_entry.node_port
+        if not node_port:
+            return None
+        try:
+            import subprocess
+            result = subprocess.run(["minikube", "ip"], capture_output=True, text=True, timeout=5)
+            host = result.stdout.strip() if result.returncode == 0 else "localhost"
+        except Exception:
+            host = "localhost"
+        return host, node_port
+
+    elif spec.type == "LoadBalancer":
+        ingress = svc.status.load_balancer.ingress if svc.status and svc.status.load_balancer else None
+        if ingress:
+            entry = ingress[0]
+            host = entry.hostname or entry.ip
+            if host:
+                return host, port_entry.port
+    return None
+
+
+async def get_replica_ready(
+    api_client: client.ApiClient,
+    instance: Instance,
+    replica_slug: str,
+) -> bool:
+    loop = asyncio.get_event_loop()
+    apps = _apps(api_client)
+    try:
+        sts = await loop.run_in_executor(
+            None,
+            lambda: apps.read_namespaced_stateful_set(
+                name=f"pg-{replica_slug}",
+                namespace=instance.k8s_namespace,
+            ),
+        )
+        return (sts.status.ready_replicas or 0) >= 1
+    except ApiException:
+        return False
 
 
 async def deprovision_instance(api_client: client.ApiClient, instance: Instance) -> None:

@@ -30,7 +30,7 @@ def namespace_manifest(instance: Instance) -> dict:
     }
 
 
-def secret_manifest(instance: Instance, password: str) -> dict:
+def secret_manifest(instance: Instance, password: str, replication_password: str = "") -> dict:
     def b64(s: str) -> str:
         return base64.b64encode(s.encode()).decode()
 
@@ -46,7 +46,29 @@ def secret_manifest(instance: Instance, password: str) -> dict:
             "POSTGRES_PASSWORD": b64(password),
             "POSTGRES_USER": b64(instance.pg_username),
             "POSTGRES_DB": b64(instance.pg_db_name),
+            "POSTGRES_REPLICATION_PASSWORD": b64(replication_password or password),
         },
+    }
+
+
+def replication_config_manifest(instance: Instance) -> dict:
+    """ConfigMap with an initdb script that creates the replication user and tunes WAL."""
+    script = (
+        "#!/bin/bash\n"
+        "set -e\n"
+        "psql -v ON_ERROR_STOP=1 --username \"$POSTGRES_USER\" <<-EOSQL\n"
+        "  CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD '$POSTGRES_REPLICATION_PASSWORD';\n"
+        "EOSQL\n"
+        "echo \"host replication replicator all md5\" >> \"$PGDATA/pg_hba.conf\"\n"
+    )
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": f"pg-init-{instance.slug}",
+            "namespace": instance.k8s_namespace,
+        },
+        "data": {"init-replication.sh": script},
     }
 
 
@@ -96,6 +118,13 @@ def statefulset_manifest(instance: Instance) -> dict:
                         {
                             "name": "postgres",
                             "image": f"postgres:{instance.pg_version}-alpine",
+                            # Enable WAL streaming replication for read replicas
+                            "args": [
+                                "-c", "wal_level=replica",
+                                "-c", "max_wal_senders=10",
+                                "-c", "wal_keep_size=64",
+                                "-c", "hot_standby=on",
+                            ],
                             "ports": [{"containerPort": 5432, "name": "postgres"}],
                             "envFrom": [{"secretRef": {"name": instance.k8s_secret_name}}],
                             "resources": {
@@ -112,7 +141,11 @@ def statefulset_manifest(instance: Instance) -> dict:
                                 {
                                     "name": "pg-data",
                                     "mountPath": "/var/lib/postgresql/data",
-                                }
+                                },
+                                {
+                                    "name": "init-scripts",
+                                    "mountPath": "/docker-entrypoint-initdb.d",
+                                },
                             ],
                             "readinessProbe": {
                                 "exec": {
@@ -189,7 +222,14 @@ def statefulset_manifest(instance: Instance) -> dict:
                         {
                             "name": "pg-data",
                             "persistentVolumeClaim": {"claimName": f"pg-data-{instance.slug}"},
-                        }
+                        },
+                        {
+                            "name": "init-scripts",
+                            "configMap": {
+                                "name": f"pg-init-{instance.slug}",
+                                "defaultMode": 0o755,
+                            },
+                        },
                     ],
                 },
             },
@@ -213,6 +253,219 @@ def clusterip_service_manifest(instance: Instance) -> dict:
                 {"name": "pgbouncer", "port": PGBOUNCER_PORT, "targetPort": PGBOUNCER_PORT},
             ],
             "type": "ClusterIP",
+        },
+    }
+
+
+def replica_pvc_manifest(instance: Instance, replica_slug: str) -> dict:
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": f"pg-data-{replica_slug}",
+            "namespace": instance.k8s_namespace,
+        },
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "storageClassName": settings.STORAGE_CLASS,
+            "resources": {"requests": {"storage": instance.storage_size}},
+        },
+    }
+
+
+def replica_statefulset_manifest(instance: Instance, replica_slug: str) -> dict:
+    """
+    Read-replica StatefulSet:
+    - init container: pg_basebackup from the primary's internal ClusterIP service
+    - main container: postgres in hot_standby mode (data already seeded)
+    - pgbouncer sidecar: pools read-only connections on port 6432
+    """
+    pool_mode = getattr(instance, "pool_mode", "transaction")
+    pool_size = getattr(instance, "pool_size", 20)
+    max_client_conn = getattr(instance, "max_client_conn", 100)
+    primary_svc = f"pg-{instance.slug}-internal"
+    sts_name = f"pg-{replica_slug}"
+
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+            "name": sts_name,
+            "namespace": instance.k8s_namespace,
+            "labels": {"arc.io/role": "replica"},
+        },
+        "spec": {
+            "selector": {"matchLabels": {"app": sts_name}},
+            "serviceName": f"pg-{replica_slug}-internal",
+            "replicas": 1,
+            "template": {
+                "metadata": {"labels": {"app": sts_name, "arc.io/role": "replica"}},
+                "spec": {
+                    "initContainers": [
+                        {
+                            "name": "pg-basebackup",
+                            "image": f"postgres:{instance.pg_version}-alpine",
+                            "command": [
+                                "sh", "-c",
+                                (
+                                    "until pg_isready -h %(svc)s -p 5432"
+                                    " -U %(user)s; do sleep 2; done; "
+                                    "pg_basebackup -h %(svc)s -p 5432"
+                                    " -U replicator -D /var/lib/postgresql/data"
+                                    " -Xs -R -P --checkpoint=fast"
+                                ) % {"svc": primary_svc, "user": instance.pg_username},
+                            ],
+                            "env": [
+                                {
+                                    "name": "PGPASSWORD",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": instance.k8s_secret_name,
+                                            "key": "POSTGRES_REPLICATION_PASSWORD",
+                                        }
+                                    },
+                                }
+                            ],
+                            "volumeMounts": [
+                                {"name": "pg-data", "mountPath": "/var/lib/postgresql/data"}
+                            ],
+                        }
+                    ],
+                    "containers": [
+                        # ── PostgreSQL (hot standby) ─────────────────────────
+                        {
+                            "name": "postgres",
+                            "image": f"postgres:{instance.pg_version}-alpine",
+                            "args": ["-c", "hot_standby=on"],
+                            "ports": [{"containerPort": 5432, "name": "postgres"}],
+                            "env": [
+                                # PGDATA must point to the seeded directory
+                                {"name": "PGDATA", "value": "/var/lib/postgresql/data"},
+                                # Required by image even in standby (won't be used)
+                                {
+                                    "name": "POSTGRES_PASSWORD",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": instance.k8s_secret_name,
+                                            "key": "POSTGRES_PASSWORD",
+                                        }
+                                    },
+                                },
+                            ],
+                            "resources": {
+                                "requests": {
+                                    "cpu": instance.cpu_request,
+                                    "memory": instance.mem_request,
+                                },
+                                "limits": {
+                                    "cpu": instance.cpu_limit,
+                                    "memory": instance.mem_limit,
+                                },
+                            },
+                            "volumeMounts": [
+                                {"name": "pg-data", "mountPath": "/var/lib/postgresql/data"}
+                            ],
+                            "readinessProbe": {
+                                "exec": {
+                                    "command": [
+                                        "pg_isready",
+                                        "-U", instance.pg_username,
+                                        "-d", instance.pg_db_name,
+                                    ]
+                                },
+                                "initialDelaySeconds": 15,
+                                "periodSeconds": 5,
+                                "failureThreshold": 12,
+                            },
+                        },
+                        # ── PgBouncer sidecar ───────────────────────────────
+                        {
+                            "name": "pgbouncer",
+                            "image": "bitnami/pgbouncer:latest",
+                            "ports": [{"containerPort": PGBOUNCER_PORT, "name": "pgbouncer"}],
+                            "env": [
+                                {"name": "POSTGRESQL_HOST", "value": "localhost"},
+                                {"name": "POSTGRESQL_PORT", "value": "5432"},
+                                {
+                                    "name": "POSTGRESQL_USERNAME",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": instance.k8s_secret_name,
+                                            "key": "POSTGRES_USER",
+                                        }
+                                    },
+                                },
+                                {
+                                    "name": "POSTGRESQL_PASSWORD",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": instance.k8s_secret_name,
+                                            "key": "POSTGRES_PASSWORD",
+                                        }
+                                    },
+                                },
+                                {
+                                    "name": "POSTGRESQL_DATABASE",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": instance.k8s_secret_name,
+                                            "key": "POSTGRES_DB",
+                                        }
+                                    },
+                                },
+                                {"name": "PGBOUNCER_PORT", "value": str(PGBOUNCER_PORT)},
+                                {"name": "PGBOUNCER_POOL_MODE", "value": pool_mode},
+                                {"name": "PGBOUNCER_DEFAULT_POOL_SIZE", "value": str(pool_size)},
+                                {"name": "PGBOUNCER_MAX_CLIENT_CONN", "value": str(max_client_conn)},
+                                {"name": "PGBOUNCER_AUTH_TYPE", "value": "md5"},
+                                {"name": "PGBOUNCER_IGNORE_STARTUP_PARAMETERS", "value": "extra_float_digits"},
+                            ],
+                            "resources": {
+                                "requests": {"cpu": "50m", "memory": "32Mi"},
+                                "limits": {"cpu": "200m", "memory": "64Mi"},
+                            },
+                            "readinessProbe": {
+                                "tcpSocket": {"port": PGBOUNCER_PORT},
+                                "initialDelaySeconds": 5,
+                                "periodSeconds": 5,
+                            },
+                        },
+                    ],
+                    "volumes": [
+                        {
+                            "name": "pg-data",
+                            "persistentVolumeClaim": {"claimName": f"pg-data-{replica_slug}"},
+                        }
+                    ],
+                },
+            },
+        },
+    }
+
+
+def replica_service_manifest(instance: Instance, replica_slug: str) -> dict:
+    """External service (NodePort / LoadBalancer) for the read replica."""
+    svc_type = "LoadBalancer" if settings.ENVIRONMENT == "prod" else "NodePort"
+    sts_name = f"pg-{replica_slug}"
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": f"pg-{replica_slug}-external",
+            "namespace": instance.k8s_namespace,
+            "annotations": {"arc.io/role": "replica"},
+        },
+        "spec": {
+            "selector": {"app": sts_name},
+            "ports": [
+                {
+                    "name": "pgbouncer",
+                    "port": PGBOUNCER_PORT,
+                    "targetPort": PGBOUNCER_PORT,
+                    "protocol": "TCP",
+                }
+            ],
+            "type": svc_type,
         },
     }
 

@@ -50,3 +50,6 @@ class Instance(Base):
     usage_records: Mapped[list["UsageRecord"]] = relationship(  # noqa: F821
         "UsageRecord", back_populates="instance", lazy="select"
     )
+    read_replicas: Mapped[list["ReadReplica"]] = relationship(  # noqa: F821
+        "ReadReplica", back_populates="instance", lazy="select"
+    )

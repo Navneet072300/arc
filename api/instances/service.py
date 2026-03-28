@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.db.models.instance import Instance
+from api.db.models.read_replica import ReadReplica
 from api.k8s import provisioner
 from api.k8s.exceptions import K8sNotFoundError, K8sProvisioningError
 from api.webhooks.service import dispatch_event
@@ -113,7 +114,8 @@ async def create_instance(
     await dispatch_event("instance.provisioning", _instance_payload(instance), user_id)
 
     password = secrets.token_hex(24)
-    return instance, password
+    replication_password = secrets.token_hex(16)
+    return instance, password, replication_password
 
 
 async def run_provisioning(
@@ -121,10 +123,11 @@ async def run_provisioning(
     api_client: k8s_client.ApiClient,
     instance: Instance,
     password: str,
+    replication_password: str = "",
 ) -> None:
     """Background task: provision K8s resources and update instance status."""
     try:
-        await provisioner.provision_instance(api_client, instance, password)
+        await provisioner.provision_instance(api_client, instance, password, replication_password)
 
         for _ in range(36):
             await asyncio.sleep(5)
@@ -209,3 +212,88 @@ async def rotate_credentials(
     conn_str = _connection_string(instance, new_password)
     await dispatch_event("credentials.rotated", _instance_payload(instance), instance.user_id)
     return new_password, conn_str
+
+
+# ── Read Replicas ────────────────────────────────────────────────────────────
+
+async def list_replicas(db: AsyncSession, instance: Instance) -> list[ReadReplica]:
+    result = await db.execute(
+        select(ReadReplica).where(
+            ReadReplica.instance_id == instance.id,
+            ReadReplica.status != "deleted",
+        )
+    )
+    return list(result.scalars())
+
+
+async def create_replica(
+    db: AsyncSession,
+    api_client: k8s_client.ApiClient,
+    instance: Instance,
+) -> ReadReplica:
+    """Create a DB record for a new read replica and kick off provisioning."""
+    replica_index = len(await list_replicas(db, instance)) + 1
+    replica_slug = f"{instance.slug}-r{replica_index}"
+
+    replica = ReadReplica(
+        instance_id=instance.id,
+        slug=replica_slug,
+        k8s_statefulset=f"pg-{replica_slug}",
+        k8s_service=f"pg-{replica_slug}-external",
+        status="provisioning",
+    )
+    db.add(replica)
+    await db.commit()
+    await db.refresh(replica)
+    return replica
+
+
+async def run_replica_provisioning(
+    db: AsyncSession,
+    api_client: k8s_client.ApiClient,
+    instance: Instance,
+    replica: ReadReplica,
+) -> None:
+    """Background: deploy K8s resources for the replica, then update status."""
+    try:
+        await provisioner.provision_replica(api_client, instance, replica.slug)
+
+        # Wait for StatefulSet to be ready (up to 3 min)
+        for _ in range(36):
+            await asyncio.sleep(5)
+            if await provisioner.get_replica_ready(api_client, instance, replica.slug):
+                break
+
+        endpoint = await provisioner.get_replica_endpoint(api_client, instance, replica.slug)
+
+        # Refresh replica from DB before updating
+        result = await db.execute(select(ReadReplica).where(ReadReplica.id == replica.id))
+        replica = result.scalar_one()
+        if endpoint:
+            replica.external_host, replica.external_port = endpoint
+        replica.status = "running"
+        await db.commit()
+
+    except K8sProvisioningError as exc:
+        logger.error("Replica provisioning failed for %s: %s", replica.slug, exc)
+        result = await db.execute(select(ReadReplica).where(ReadReplica.id == replica.id))
+        replica = result.scalar_one_or_none()
+        if replica:
+            replica.status = "error"
+            await db.commit()
+
+
+async def delete_replica(
+    db: AsyncSession,
+    api_client: k8s_client.ApiClient,
+    instance: Instance,
+    replica: ReadReplica,
+) -> None:
+    replica.status = "deleting"
+    await db.commit()
+    try:
+        await provisioner.deprovision_replica(api_client, instance, replica.slug)
+    except Exception as exc:
+        logger.error("Error deprovisioning replica %s: %s", replica.slug, exc)
+    replica.status = "deleted"
+    await db.commit()

@@ -90,3 +90,15 @@ class InstanceStatusResponse(BaseModel):
     status: str
     external_host: str | None
     external_port: int | None
+
+
+class ReadReplicaResponse(BaseModel):
+    id: uuid.UUID
+    instance_id: uuid.UUID
+    slug: str
+    status: str
+    external_host: str | None
+    external_port: int | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

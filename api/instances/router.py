@@ -28,10 +28,14 @@ async def create_instance(
     current_user: User = Depends(get_current_user),
 ):
     api_client = get_k8s_client()
-    instance, password = await service.create_instance(db, api_client, current_user.id, body.model_dump())
+    instance, password, replication_password = await service.create_instance(
+        db, api_client, current_user.id, body.model_dump()
+    )
 
     # Provision K8s resources in background; client polls /instances/{id}/status
-    background_tasks.add_task(service.run_provisioning, db, api_client, instance, password)
+    background_tasks.add_task(
+        service.run_provisioning, db, api_client, instance, password, replication_password
+    )
 
     conn_str = service._connection_string(instance, password) if instance.external_host else None
     return schemas.InstanceCreatedResponse(
@@ -106,6 +110,65 @@ async def delete_instance(
     api_client = get_k8s_client()
     background_tasks.add_task(service.delete_instance, db, api_client, instance)
     return {"detail": "Deletion initiated", "id": str(instance_id)}
+
+
+@router.get("/{instance_id}/replicas", response_model=list[schemas.ReadReplicaResponse])
+async def list_replicas(
+    instance_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    instance = await service.get_instance(db, current_user.id, instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    return await service.list_replicas(db, instance)
+
+
+@router.post(
+    "/{instance_id}/replicas",
+    response_model=schemas.ReadReplicaResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_replica(
+    instance_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    instance = await service.get_instance(db, current_user.id, instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    if instance.status != "running":
+        raise HTTPException(status_code=400, detail="Primary instance must be running to add a replica")
+    api_client = get_k8s_client()
+    replica = await service.create_replica(db, api_client, instance)
+    background_tasks.add_task(service.run_replica_provisioning, db, api_client, instance, replica)
+    return replica
+
+
+@router.delete(
+    "/{instance_id}/replicas/{replica_id}",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def delete_replica(
+    instance_id: uuid.UUID,
+    replica_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    instance = await service.get_instance(db, current_user.id, instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    replicas = await service.list_replicas(db, instance)
+    replica = next((r for r in replicas if r.id == replica_id), None)
+    if not replica:
+        raise HTTPException(status_code=404, detail="Replica not found")
+    if replica.status in ("deleting", "deleted"):
+        raise HTTPException(status_code=400, detail=f"Replica is already {replica.status}")
+    api_client = get_k8s_client()
+    background_tasks.add_task(service.delete_replica, db, api_client, instance, replica)
+    return {"detail": "Replica deletion initiated", "id": str(replica_id)}
 
 
 @router.post("/{instance_id}/suspend", status_code=status.HTTP_200_OK)

@@ -1,8 +1,8 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import React, { useState, useEffect, useCallback, useRef } from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import { Plus, RefreshCw, Trash2, KeyRound, Database, Layers, Pause, Play } from "lucide-react"
+import { Plus, RefreshCw, Trash2, KeyRound, Database, Layers, Pause, Play, GitBranch } from "lucide-react"
 
 import { apiFetch } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -13,6 +13,16 @@ import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+
+interface Replica {
+  id: string
+  instance_id: string
+  slug: string
+  status: string
+  external_host: string | null
+  external_port: number | null
+  created_at: string
+}
 
 interface Instance {
   id: string
@@ -55,6 +65,10 @@ export default function InstancesPage() {
   // Creds Modal
   const [credsOpen, setCredsOpen] = useState(false)
   const [credsData, setCredsData] = useState<any>(null)
+
+  // Replicas
+  const [replicas, setReplicas] = useState<{ [instanceId: string]: Replica[] }>({})
+  const [expandedReplicas, setExpandedReplicas] = useState<string | null>(null)
 
   const pollTimers = useRef<{ [key: string]: NodeJS.Timeout }>({})
 
@@ -134,6 +148,43 @@ export default function InstancesPage() {
       loadInstances()
     } catch (err: any) {
       alert(err.detail || "Delete failed")
+    }
+  }
+
+  const loadReplicas = async (instanceId: string) => {
+    try {
+      const data = await apiFetch(`/instances/${instanceId}/replicas`)
+      setReplicas(prev => ({ ...prev, [instanceId]: data }))
+    } catch {
+      // ignore
+    }
+  }
+
+  const toggleReplicas = async (instanceId: string) => {
+    if (expandedReplicas === instanceId) {
+      setExpandedReplicas(null)
+    } else {
+      setExpandedReplicas(instanceId)
+      await loadReplicas(instanceId)
+    }
+  }
+
+  const handleAddReplica = async (instanceId: string) => {
+    try {
+      await apiFetch(`/instances/${instanceId}/replicas`, { method: "POST" })
+      await loadReplicas(instanceId)
+    } catch (err: any) {
+      alert(err.detail || "Failed to create replica")
+    }
+  }
+
+  const handleDeleteReplica = async (instanceId: string, replicaId: string) => {
+    if (!window.confirm("Delete this read replica?")) return
+    try {
+      await apiFetch(`/instances/${instanceId}/replicas/${replicaId}`, { method: "DELETE" })
+      await loadReplicas(instanceId)
+    } catch (err: any) {
+      alert(err.detail || "Failed to delete replica")
     }
   }
 
@@ -230,8 +281,8 @@ export default function InstancesPage() {
               <TableBody>
                 <AnimatePresence>
                   {instances.map((i) => (
+                    <React.Fragment key={i.id}>
                     <motion.tr
-                      key={i.id}
                       initial={{ opacity: 0, y: 10 }}
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, scale: 0.95 }}
@@ -258,6 +309,11 @@ export default function InstancesPage() {
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
                           {i.status === "running" && (
+                            <Button variant="outline" size="sm" onClick={() => toggleReplicas(i.id)} title="Read Replicas" className={`border-sky-500/20 hover:bg-sky-500/10 hover:text-sky-400 text-zinc-400 ${expandedReplicas === i.id ? "bg-sky-500/10 text-sky-400" : ""}`}>
+                              <GitBranch className="h-4 w-4" />
+                            </Button>
+                          )}
+                          {i.status === "running" && (
                             <Button variant="outline" size="sm" onClick={() => handleSuspend(i.id, i.name)} title="Suspend" className="border-violet-500/20 hover:bg-violet-500/10 hover:text-violet-400 text-zinc-400">
                               <Pause className="h-4 w-4" />
                             </Button>
@@ -280,6 +336,42 @@ export default function InstancesPage() {
                         </div>
                       </TableCell>
                     </motion.tr>
+                    {/* Read replicas expansion */}
+                    {expandedReplicas === i.id && (
+                      <tr key={`${i.id}-replicas`} className="bg-zinc-900/30">
+                        <td colSpan={8} className="px-4 py-3">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-xs font-medium text-sky-400 flex items-center gap-1">
+                              <GitBranch className="h-3 w-3" /> Read Replicas
+                            </span>
+                            <Button size="sm" variant="outline" onClick={() => handleAddReplica(i.id)} className="h-6 text-xs border-sky-500/30 hover:bg-sky-500/10 hover:text-sky-400 text-zinc-400">
+                              <Plus className="h-3 w-3 mr-1" /> Add Replica
+                            </Button>
+                          </div>
+                          {(replicas[i.id] || []).length === 0 ? (
+                            <p className="text-xs text-zinc-500">No replicas yet. Add one to enable read scaling.</p>
+                          ) : (
+                            <div className="space-y-1">
+                              {(replicas[i.id] || []).map(r => (
+                                <div key={r.id} className="flex items-center justify-between rounded bg-zinc-800/50 px-3 py-1.5">
+                                  <div className="flex items-center gap-3">
+                                    <span className="font-mono text-xs text-zinc-300">{r.slug}</span>
+                                    {getStatusBadge(r.status)}
+                                    {r.external_host && (
+                                      <span className="font-mono text-xs text-zinc-500">{r.external_host}:{r.external_port}</span>
+                                    )}
+                                  </div>
+                                  <Button size="sm" variant="ghost" aria-label="Delete replica" onClick={() => handleDeleteReplica(i.id, r.id)} className="h-6 w-6 p-0 text-zinc-500 hover:text-destructive">
+                                    <Trash2 className="h-3 w-3" />
+                                  </Button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
                   ))}
                 </AnimatePresence>
               </TableBody>
