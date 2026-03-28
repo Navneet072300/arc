@@ -15,6 +15,7 @@ from api.instances.router import router as instances_router
 from api.k8s.client import get_k8s_client
 from api.metering.collector import aggregate_billing, collect_usage
 from api.users.router import router as users_router
+from api.webhooks.router import router as webhooks_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(instances_router)
 app.include_router(billing_router)
+app.include_router(webhooks_router)
 
 # Dashboard static files
 try:

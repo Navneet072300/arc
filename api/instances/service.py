@@ -16,10 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.db.models.instance import Instance
 from api.k8s import provisioner
 from api.k8s.exceptions import K8sNotFoundError, K8sProvisioningError
+from api.webhooks.service import dispatch_event
 
 logger = logging.getLogger(__name__)
 
-# Pricing constants (USD per unit-hour)
 CPU_PRICE_PER_CORE_HOUR = 0.048
 MEM_PRICE_PER_GB_HOUR = 0.006
 STORAGE_PRICE_PER_GB_DAY = 0.0001
@@ -42,6 +42,18 @@ def _connection_string(instance: Instance, password: str | None = None) -> str:
     )
 
 
+def _instance_payload(instance: Instance) -> dict:
+    return {
+        "instance_id": str(instance.id),
+        "instance_name": instance.name,
+        "slug": instance.slug,
+        "status": instance.status,
+        "pg_version": instance.pg_version,
+        "external_host": instance.external_host,
+        "external_port": instance.external_port,
+    }
+
+
 async def list_instances(db: AsyncSession, user_id: uuid.UUID) -> list[Instance]:
     result = await db.execute(
         select(Instance).where(Instance.user_id == user_id, Instance.status != "deleted")
@@ -62,14 +74,9 @@ async def create_instance(
     user_id: uuid.UUID,
     data: dict,
 ) -> tuple[Instance, str]:
-    """
-    Creates the DB record with status=provisioning and kicks off a background task.
-    Returns (instance, password) — password is shown once.
-    """
     name = data["name"]
     slug = _make_slug(user_id, name)
 
-    # Check uniqueness
     existing = await db.execute(select(Instance).where(Instance.slug == slug))
     if existing.scalar_one_or_none():
         slug = f"{slug}-{secrets.token_hex(2)}"
@@ -100,6 +107,8 @@ async def create_instance(
     await db.commit()
     await db.refresh(instance)
 
+    await dispatch_event("instance.provisioning", _instance_payload(instance), user_id)
+
     password = secrets.token_hex(24)
     return instance, password
 
@@ -114,23 +123,24 @@ async def run_provisioning(
     try:
         await provisioner.provision_instance(api_client, instance, password)
 
-        # Poll for readiness (up to 3 minutes)
         for _ in range(36):
             await asyncio.sleep(5)
             if await provisioner.get_statefulset_ready(api_client, instance):
                 break
 
-        # Fetch external endpoint
         endpoint = await provisioner.get_service_endpoint(api_client, instance)
         if endpoint:
             instance.external_host, instance.external_port = endpoint
 
         instance.status = "running"
+        await db.commit()
+        await dispatch_event("instance.running", _instance_payload(instance), instance.user_id)
+
     except K8sProvisioningError as exc:
         logger.error("Provisioning failed for %s: %s", instance.slug, exc)
         instance.status = "error"
-
-    await db.commit()
+        await db.commit()
+        await dispatch_event("instance.error", {**_instance_payload(instance), "error": str(exc)}, instance.user_id)
 
 
 async def delete_instance(
@@ -143,11 +153,13 @@ async def delete_instance(
     try:
         await provisioner.deprovision_instance(api_client, instance)
     except K8sNotFoundError:
-        pass  # Already gone
+        pass
     except K8sProvisioningError as exc:
         logger.error("Deprovision error for %s: %s", instance.slug, exc)
+
     instance.status = "deleted"
     await db.commit()
+    await dispatch_event("instance.deleted", _instance_payload(instance), instance.user_id)
 
 
 async def rotate_credentials(
@@ -155,8 +167,8 @@ async def rotate_credentials(
     api_client: k8s_client.ApiClient,
     instance: Instance,
 ) -> tuple[str, str]:
-    """Rotate the PostgreSQL password. Returns (new_password, connection_string)."""
     new_password = secrets.token_hex(24)
     await provisioner.rotate_password(api_client, instance, new_password)
     conn_str = _connection_string(instance, new_password)
+    await dispatch_event("credentials.rotated", _instance_payload(instance), instance.user_id)
     return new_password, conn_str

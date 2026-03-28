@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation"
 import { logout } from "@/lib/api"
 import { useUser } from "@/lib/useUser"
 import { Button } from "@/components/ui/button"
-import { Database, ShieldCheck } from "lucide-react"
+import { Database, ShieldCheck, Webhook } from "lucide-react"
 
 export function Navigation() {
   const pathname = usePathname()
@@ -25,6 +25,10 @@ export function Navigation() {
         <div className="flex flex-1 items-center gap-4 text-sm font-medium">
           <Link href="/app" className={linkClass("/app")}>Instances</Link>
           <Link href="/billing" className={linkClass("/billing")}>Billing</Link>
+          <Link href="/webhooks" className={`flex items-center gap-1 ${linkClass("/webhooks")}`}>
+            <Webhook className="h-4 w-4" />
+            Webhooks
+          </Link>
           {user?.is_admin && (
             <Link href="/admin" className={`flex items-center gap-1 ${linkClass("/admin")}`}>
               <ShieldCheck className="h-4 w-4" />
