@@ -1,6 +1,4 @@
-import asyncio
 import os
-import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,14 +16,7 @@ TEST_DB_URL = os.environ.get(
 )
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def test_engine():
     engine = create_async_engine(TEST_DB_URL, echo=False)
     async with engine.begin() as conn:
@@ -36,21 +27,20 @@ async def test_engine():
     await engine.dispose()
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def db_session(test_engine):
     session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
     async with session_factory() as session:
         yield session
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def client(db_session):
     async def override_get_db():
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
 
-    # Mock K8s client so tests don't need a cluster
     with patch("api.k8s.client.get_k8s_client") as mock_k8s:
         mock_k8s.return_value = MagicMock()
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
