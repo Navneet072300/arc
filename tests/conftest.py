@@ -16,7 +16,7 @@ TEST_DB_URL = os.environ.get(
 )
 
 
-@pytest_asyncio.fixture(scope="session", loop_scope="session")
+@pytest_asyncio.fixture
 async def test_engine():
     engine = create_async_engine(TEST_DB_URL, echo=False)
     async with engine.begin() as conn:
@@ -27,14 +27,14 @@ async def test_engine():
     await engine.dispose()
 
 
-@pytest_asyncio.fixture(loop_scope="session")
+@pytest_asyncio.fixture
 async def db_session(test_engine):
     session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
     async with session_factory() as session:
         yield session
 
 
-@pytest_asyncio.fixture(loop_scope="session")
+@pytest_asyncio.fixture
 async def client(db_session):
     async def override_get_db():
         yield db_session
