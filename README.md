@@ -1,92 +1,86 @@
 # Arc — Serverless PostgreSQL Platform
 
 > Self-hosted serverless PostgreSQL as a Service, running on AWS EKS.
-> Provision isolated, production-ready PostgreSQL clusters on demand — with connection pooling, scale-to-zero, read replicas, PITR, webhooks, and a full-featured dashboard.
+> Provision isolated, production-ready PostgreSQL clusters on demand — connection pooling, scale-to-zero, read replicas, PITR, webhooks, and a full dashboard.
 
 **Inspired by:** Neon · Supabase · Render Postgres
 
 ---
 
-## Live Screenshots
+## Architecture
 
-### Dashboard — Instance List
-![Instance List](docs/screenshots/instances.png)
+[![Architecture Diagram](https://excalidraw.com/favicon.ico)](https://excalidraw.com/#json=uc6DXmTtAqvHiJGsgDYqu,ok66isMnNn-Ec9zq5WQwEg)
 
-Manage all your PostgreSQL instances from one place. See status, version, host, port, pooling config, and creation date at a glance.
+**[View full architecture diagram on Excalidraw →](https://excalidraw.com/#json=uc6DXmTtAqvHiJGsgDYqu,ok66isMnNn-Ec9zq5WQwEg)**
 
-### Provisioning Form
-![New Instance](docs/screenshots/new-instance.png)
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        Internet / Users                          │
+└───────────────────────────┬──────────────────────────────────────┘
+                            │ HTTP :80
+                 ┌──────────▼──────────┐
+                 │    AWS Classic ELB   │
+                 └──────────┬──────────┘
+                            │
+         ┌──────────────────▼─────────────────────┐
+         │           arc-system (EKS)              │
+         │   ┌─────────────────────────────────┐   │
+         │   │     Arc API  (FastAPI)           │   │
+         │   │     2–10 pods · HPA · PDB        │   │
+         │   └──────┬──────────────┬────────────┘   │
+         └──────────┼──────────────┼────────────────┘
+                    │              │
+         ┌──────────▼──┐  ┌────────▼──────────────────────────┐
+         │  Amazon RDS  │  │  Per-Instance Namespace (EKS)     │
+         │  PostgreSQL  │  │  ┌─────────────────────────────┐  │
+         │  (control DB)│  │  │ StatefulSet                 │  │
+         │              │  │  │  ┌──────────┐ ┌──────────┐  │  │
+         │  users       │  │  │  │PostgreSQL│ │PgBouncer │  │  │
+         │  instances   │  │  │  │  :5432   │ │  :6432   │  │  │
+         │  billing     │  │  │  └──────────┘ └──────────┘  │  │
+         │  webhooks    │  │  │  PVC (EBS gp3) · Secret      │  │
+         └──────────────┘  │  └─────────────────────────────┘  │
+                           │  (one isolated namespace/instance) │
+                           └───────────────────────────────────┘
 
-Create a new instance with PostgreSQL version, storage size, PgBouncer pool mode, pool size, max client connections, and scale-to-zero idle timeout — all configurable upfront.
-
-### Connection Details
-![Connection Details](docs/screenshots/connection-details.png)
-
-After creation, Arc returns a one-time password and full connection string. The password is never stored — rotate it any time via the API or dashboard.
-
-### Billing & Usage
-![Billing](docs/screenshots/billing.png)
-
-CPU and memory usage are sampled every 60 seconds per instance. Monthly summaries aggregate usage into estimated cost breakdowns.
-
-### Webhooks
-![Webhooks](docs/screenshots/webhooks.png)
-
-Subscribe to lifecycle events and receive HMAC-SHA256 signed HTTP payloads. Supports `instance.provisioning`, `instance.running`, `instance.error`, `instance.deleted`, `credentials.rotated`, and `*` (all events).
+  CI/CD: GitHub Actions → ECR → EKS
+  IaC:   Terraform  (VPC · EKS · RDS · ECR)
+  State: S3 + DynamoDB lock
+```
 
 ---
 
-## Architecture
+## Live Dashboard
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                            Internet / Users                              │
-└────────────────────────────────┬─────────────────────────────────────────┘
-                                 │  HTTP :80
-                      ┌──────────▼──────────┐
-                      │    AWS Classic ELB   │
-                      └──────────┬──────────┘
-                                 │
-              ┌──────────────────▼──────────────────┐
-              │           arc-system namespace        │
-              │                                       │
-              │   ┌─────────────────────────────┐    │
-              │   │       Arc API (FastAPI)      │    │
-              │   │       2–10 pods (HPA)        │    │
-              │   │   uvicorn --workers 2        │    │
-              │   └──────┬──────────────┬────────┘    │
-              │          │              │              │
-              └──────────┼──────────────┼──────────────┘
-                         │              │
-              ┌──────────▼───┐  ┌───────▼──────────────────┐
-              │  Amazon RDS   │  │   EKS Node Group          │
-              │  PostgreSQL   │  │   (t3.medium × 3)         │
-              │  (control DB) │  │                           │
-              │  users        │  │  ┌────────────────────┐   │
-              │  instances    │  │  │ pg-<slug> namespace │   │
-              │  billing      │  │  │                     │   │
-              │  webhooks     │  │  │ ┌────────────────┐  │   │
-              │  audit_logs   │  │  │ │  StatefulSet   │  │   │
-              └───────────────┘  │  │ │ ┌────────────┐ │  │   │
-                                 │  │ │ │ PostgreSQL │ │  │   │
-                                 │  │ │ │   :5432    │ │  │   │
-                                 │  │ │ ├────────────┤ │  │   │
-                                 │  │ │ │ PgBouncer  │ │  │   │
-                                 │  │ │ │   :6432    │ │  │   │
-                                 │  │ │ └────────────┘ │  │   │
-                                 │  │ │ PVC (EBS gp3)  │  │   │
-                                 │  │ │ Secret (creds) │  │   │
-                                 │  │ └────────────────┘  │   │
-                                 │  │  (one per instance) │   │
-                                 │  └─────────────────────┘   │
-                                 └───────────────────────────┘
+### PostgreSQL Instances
 
-    CI/CD: GitHub Actions → ECR → EKS
-    IaC:   Terraform (VPC · EKS · RDS · ECR)
-    State: S3 + DynamoDB lock
-```
+![Instances](docs/screenshots/instances.png)
 
-> **Architecture diagram:** [View on Excalidraw](https://excalidraw.com/#json=arc-architecture)
+Manage all your PostgreSQL clusters from one view — status, version, host, port, pooling config, and creation date.
+
+### New Instance — Provisioning Form
+
+![New Instance Form](docs/screenshots/new-instance.png)
+
+Configure PostgreSQL version, storage, PgBouncer pool mode (session / transaction / statement), pool size, max client connections, and scale-to-zero idle timeout in a single form.
+
+### Connection Details
+
+![Connection Details](docs/screenshots/connection-details.png)
+
+After provisioning, Arc returns a one-time password and full connection string. The password is never stored in the control plane — rotate it any time via the API or dashboard.
+
+### Billing & Usage
+
+![Billing](docs/screenshots/billing.png)
+
+CPU and memory metrics are collected every 60 seconds per instance using the Kubernetes Metrics Server. Monthly summaries aggregate usage into estimated cost breakdowns.
+
+### Webhooks
+
+![Webhooks](docs/screenshots/webhooks.png)
+
+Subscribe HTTP endpoints to lifecycle events. Arc delivers HMAC-SHA256 signed payloads with automatic retry (3 attempts, exponential backoff: 5s → 25s → 125s).
 
 ---
 
@@ -96,15 +90,14 @@ Subscribe to lifecycle events and receive HMAC-SHA256 signed HTTP payloads. Supp
 |---|---|
 | **On-demand provisioning** | Create a PostgreSQL cluster in seconds via API or dashboard |
 | **Full isolation** | Each instance has its own K8s namespace, StatefulSet, PVC, Secret, and credentials |
-| **PgBouncer sidecar** | Connection pooler on port 6432; session, transaction, or statement mode |
+| **PgBouncer sidecar** | Connection pooler on port 6432 — session, transaction, or statement mode |
 | **Scale-to-zero** | StatefulSet scaled to 0 replicas after idle timeout; auto-resumes on demand |
-| **Read replicas** | Streaming replication (`wal_level=replica`); replicas as separate StatefulSets |
+| **Read replicas** | PostgreSQL streaming replication; replicas as separate StatefulSets |
 | **PITR** | WAL archiving to S3; restore to any point in time |
-| **Webhooks** | HMAC-SHA256 signed event delivery; 3 retries with exponential backoff |
+| **Webhooks** | HMAC-SHA256 signed events; 3 retries with exponential backoff |
 | **Metering** | CPU/memory sampled every 60s via Kubernetes Metrics Server |
 | **Billing** | Monthly usage aggregation with cost estimates |
 | **Admin panel** | User management, instance oversight, billing trigger |
-| **CI/CD** | GitHub Actions: test → build (ECR) → migrate → deploy (EKS) |
 | **HPA** | Arc API auto-scales 2–10 pods on CPU/memory pressure |
 | **PodDisruptionBudget** | Minimum 1 API pod always available during node drain |
 
@@ -119,10 +112,9 @@ Subscribe to lifecycle events and receive HMAC-SHA256 signed HTTP payloads. Supp
 | API framework | FastAPI (Python 3.12) + Uvicorn |
 | Database ORM | SQLAlchemy 2.0 async + asyncpg |
 | Auth | JWT (python-jose) + bcrypt |
-| Background scheduler | APScheduler (metering, billing, idle checks) |
+| Background jobs | APScheduler — metering, billing, idle checks |
 | Migrations | Alembic (async) |
 | Config | pydantic-settings |
-| HTTP client | httpx |
 
 ### Infrastructure
 
@@ -131,67 +123,74 @@ Subscribe to lifecycle events and receive HMAC-SHA256 signed HTTP payloads. Supp
 | Kubernetes | Amazon EKS 1.31 — managed node group (t3.medium × 3) |
 | Container registry | Amazon ECR |
 | Control plane DB | Amazon RDS PostgreSQL 16 (db.t3.micro, gp3, encrypted) |
-| Block storage | AWS EBS gp3 (via EBS CSI driver) |
+| Block storage | AWS EBS gp3 (EBS CSI driver) |
 | Load balancer | AWS Classic ELB |
 | IaC | Terraform ≥ 1.6 (VPC · EKS · RDS · ECR modules) |
-| Terraform state | S3 bucket + DynamoDB lock table |
+| Terraform state | S3 + DynamoDB lock |
 
 ### Per-Instance Stack
 
 | Component | Technology |
 |---|---|
-| Database | PostgreSQL 16-alpine (StatefulSet, 1 replica) |
-| Connection pooler | PgBouncer (sidecar container on port 6432) |
-| Replication | PostgreSQL streaming replication (`wal_level=replica`) |
+| Database | PostgreSQL 16-alpine (StatefulSet) |
+| Connection pooler | PgBouncer sidecar (port 6432) |
+| Replication | PostgreSQL streaming replication |
 | Storage | AWS EBS gp3 PersistentVolumeClaim |
 | Isolation | Dedicated Kubernetes namespace per instance |
-| Credentials | Kubernetes Secret (never stored in Arc DB) |
 
 ### Frontend & CI/CD
 
 | Component | Technology |
 |---|---|
-| Dashboard | Next.js 14 (static export, served via FastAPI StaticFiles at `/ui`) |
-| Docker build | Multi-stage: Node 20-alpine (Next.js build) → Python 3.12-slim |
+| Dashboard | Next.js 14 (static export → FastAPI StaticFiles at `/ui`) |
+| Docker | Multi-stage: Node 20-alpine → Python 3.12-slim |
 | Tests | pytest + pytest-asyncio + postgres:16 service container |
-| Pipeline | GitHub Actions: test → docker buildx → ECR push → kubectl deploy |
+| Pipeline | GitHub Actions: test → ECR push → migrate → EKS deploy |
 
 ---
 
-## Key Services Explained
-
-### PgBouncer — Connection Pooling
-Every PostgreSQL instance runs a PgBouncer sidecar. Clients connect on **port 6432** (not 5432 directly). PgBouncer maintains a pool of server-side connections and multiplexes client connections — critical for serverless workloads where connections spike unpredictably.
-
-- **Transaction mode** (default) — connection returned to pool after each transaction. Best for serverless.
-- **Session mode** — one server connection per client session. Best for long-lived applications.
-- **Statement mode** — connection returned after each statement.
-
-### Scale-to-Zero
-APScheduler checks CPU metrics every minute. When an instance's CPU falls below threshold for longer than `idle_timeout_minutes`:
-1. `StatefulSet.replicas` is set to `0` — pods terminate, PVC is retained
-2. Status changes to `suspended`
-3. On resume: replicas set back to `1`, pod starts, connection available in ~15 seconds
-
-### Webhooks
-When instance lifecycle events occur, Arc:
-1. Queries all active webhook endpoints subscribed to that event
-2. Creates a `WebhookDelivery` record
-3. Fires an HMAC-SHA256 signed HTTP POST to the endpoint URL
-4. Retries up to 3 times with exponential backoff (5s → 25s → 125s)
-5. Records status (`success` / `failed`) and response body per attempt
+## How It Works
 
 ### Provisioning Flow
+
 ```
 POST /instances
     │
-    ├─► Create DB record (status: provisioning)
-    ├─► Return 202 Accepted + credentials
+    ├─► Create DB record  (status: provisioning)
+    ├─► Return 202 + one-time password
     │
     └─► Background task:
             Namespace → Secret → PVC → StatefulSet → Services
-            Poll readiness → status: running
+            Poll readiness  →  status: running
             Fire webhook: instance.running
+```
+
+### Scale-to-Zero
+
+APScheduler checks CPU metrics every minute. If idle past `idle_timeout_minutes`:
+1. `StatefulSet.replicas = 0` — pods stop, PVC retained
+2. Status → `suspended`
+3. On `POST /instances/{id}/resume` → replicas back to 1, ready in ~15s
+
+### PgBouncer Connection Pooling
+
+Each instance runs two containers in the same pod:
+- **postgres** on port 5432 — accepts connections from PgBouncer only
+- **pgbouncer** on port 6432 — clients connect here; pools connections to postgres
+
+**Transaction mode** (default) returns connections to the pool after each transaction — optimal for serverless workloads where connections spike unpredictably.
+
+### Webhooks
+
+```
+Event fires (e.g. instance.running)
+    │
+    ├─► Query active endpoints subscribed to event
+    ├─► Create WebhookDelivery records
+    ├─► Sign payload: sha256=HMAC(secret, body)
+    └─► POST to endpoint URL
+            Retry on failure: 5s → 25s → 125s
+            Record status + response per attempt
 ```
 
 ---
@@ -201,83 +200,63 @@ POST /instances
 ```
 .
 ├── api/
-│   ├── main.py                # App factory, lifespan, scheduler init
-│   ├── config.py              # Settings via env vars (pydantic-settings)
-│   ├── dependencies.py        # JWT auth FastAPI dependency
+│   ├── main.py                # App factory, lifespan, scheduler
 │   ├── auth/                  # Register, login, JWT
 │   ├── instances/             # CRUD, provisioning, scale-to-zero, replicas, PITR
-│   ├── admin/                 # Admin panel (stats, user mgmt, billing trigger)
+│   ├── admin/                 # Admin panel
 │   ├── billing/               # Usage queries, monthly summaries
-│   ├── metering/              # APScheduler: collect_usage, aggregate_billing
-│   ├── webhooks/              # Endpoint management, HMAC dispatch, retry
-│   ├── k8s/
-│   │   ├── client.py          # K8s client (in-cluster / kubeconfig)
-│   │   ├── manifests.py       # Pure-Python K8s resource builders
-│   │   └── provisioner.py     # Namespace → Secret → PVC → StatefulSet → Services
+│   ├── metering/              # APScheduler collectors
+│   ├── webhooks/              # HMAC dispatch, retry engine
+│   ├── k8s/                   # Manifest builders, provisioner, K8s client
 │   └── db/
-│       ├── models/            # User, Instance, UsageRecord, BillingSummary, AuditLog
-│       │                      # WebhookEndpoint, WebhookDelivery, ReadReplica, Backup
+│       ├── models/            # All SQLAlchemy models
 │       └── migrations/        # Alembic async migrations
-├── frontend/                  # Next.js 14 dashboard (static export)
+├── frontend/                  # Next.js 14 dashboard
 ├── k8s/
-│   ├── namespace.yaml         # arc-system namespace
+│   ├── namespace.yaml
 │   ├── storageclass.yaml      # gp3 default StorageClass
-│   ├── metrics-server.yaml    # metrics-server v0.7.1
-│   ├── migration-job.yaml     # One-off Alembic migration Job
-│   ├── api-deployment.yaml    # Deployment + HPA + PDB + LoadBalancer Service
-│   └── rbac.yaml              # ClusterRole + ClusterRoleBinding for arc-api SA
+│   ├── metrics-server.yaml
+│   ├── migration-job.yaml     # One-off Alembic Job
+│   ├── api-deployment.yaml    # Deployment + HPA + PDB + Service
+│   └── rbac.yaml              # ClusterRole for arc-api ServiceAccount
 ├── terraform/
-│   ├── main.tf                # Root module (VPC + EKS + RDS + ECR)
-│   ├── terraform.tfvars       # Variable values
-│   ├── versions.tf            # S3 backend, provider versions
-│   └── modules/
-│       ├── vpc/               # VPC, subnets (3 AZ), NAT gateway
-│       ├── eks/               # EKS cluster, managed node group, addons
-│       └── rds/               # RDS PostgreSQL, parameter group, subnet group
-├── .github/workflows/
-│   └── deploy.yml             # CI: test → build → migrate → deploy
-├── Dockerfile                 # Multi-stage: Node 20 + Python 3.12
-├── pytest.ini
+│   ├── modules/ (vpc · eks · rds)
+│   └── terraform.tfvars
+├── .github/workflows/deploy.yml
+├── Dockerfile
 └── requirements.txt
 ```
 
 ---
 
-## Deployment Guide
+## Deployment
 
 ### Prerequisites
 - AWS account · IAM user with AdministratorAccess
-- Terraform ≥ 1.6
-- AWS CLI, kubectl, Docker, GitHub CLI (`gh`)
+- Terraform ≥ 1.6, AWS CLI, kubectl, Docker, `gh`
 
-### Step 1 — Bootstrap Terraform state backend
+### 1 — Bootstrap state backend
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-
 aws s3 mb s3://arc-tfstate-${ACCOUNT_ID} --region us-east-1
-
 aws dynamodb create-table \
   --table-name terraform-state-lock \
   --attribute-definitions AttributeName=LockID,AttributeType=S \
   --key-schema AttributeName=LockID,KeyType=HASH \
-  --billing-mode PAY_PER_REQUEST \
-  --region us-east-1
+  --billing-mode PAY_PER_REQUEST --region us-east-1
 ```
 
-### Step 2 — Provision AWS infrastructure
+### 2 — Provision infrastructure
 ```bash
-cd terraform
-terraform init
-terraform apply -auto-approve
+cd terraform && terraform init && terraform apply -auto-approve
 ```
-Creates: VPC (3 AZ) · EKS cluster · managed node group · RDS PostgreSQL 16 · ECR repository
 
-### Step 3 — Connect kubectl
+### 3 — Configure kubectl
 ```bash
 aws eks update-kubeconfig --region us-east-1 --name arc-cluster
 ```
 
-### Step 4 — Apply base Kubernetes resources
+### 4 — Apply Kubernetes resources
 ```bash
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/storageclass.yaml
@@ -286,29 +265,23 @@ kubectl apply -f k8s/rbac.yaml
 kubectl apply -f k8s/api-deployment.yaml
 ```
 
-### Step 5 — Create the API secret
+### 5 — Create API secret
 ```bash
-# Get RDS endpoint from terraform output
-RDS=$(cd terraform && terraform output -raw rds_endpoint)
-
-kubectl delete secret arc-api-env -n arc-system --ignore-not-found
 kubectl create secret generic arc-api-env -n arc-system \
-  --from-literal=DATABASE_URL="postgresql+asyncpg://arcadmin:<password>@${RDS}/arc_control" \
+  --from-literal=DATABASE_URL='postgresql+asyncpg://<user>:<pass>@<rds-endpoint>:5432/arc_control' \
   --from-literal=SECRET_KEY="$(openssl rand -hex 32)" \
   --from-literal=ENVIRONMENT="prod" \
   --from-literal=STORAGE_CLASS="gp3"
 ```
 
-### Step 6 — Add GitHub secrets and trigger CI/CD
+### 6 — Deploy via GitHub Actions
 ```bash
 gh secret set AWS_ACCESS_KEY_ID
 gh secret set AWS_SECRET_ACCESS_KEY
 gh workflow run deploy.yml
 ```
 
-The pipeline will: run tests → build Docker image → push to ECR → run Alembic migrations → rolling deploy to EKS.
-
-### Step 7 — Get your endpoint
+### 7 — Get your endpoint
 ```bash
 kubectl get svc arc-api -n arc-system \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
@@ -318,63 +291,40 @@ kubectl get svc arc-api -n arc-system \
 
 ## API Reference
 
-Full interactive docs at `http://<endpoint>/docs`
+Full docs at `http://<endpoint>/docs`
 
 | Method | Path | Description |
 |---|---|---|
 | POST | `/auth/register` | Create account |
 | POST | `/auth/login` | Get JWT token |
 | GET | `/instances` | List instances |
-| POST | `/instances` | Create instance (202 async) |
-| GET | `/instances/{id}` | Instance detail + connection string |
-| DELETE | `/instances/{id}` | Delete instance (202 async) |
+| POST | `/instances` | Create instance (202) |
+| DELETE | `/instances/{id}` | Delete instance |
 | POST | `/instances/{id}/suspend` | Scale to zero |
 | POST | `/instances/{id}/resume` | Resume from zero |
 | POST | `/instances/{id}/credentials/rotate` | Rotate password |
-| GET | `/instances/{id}/backups` | List backups |
 | POST | `/instances/{id}/backups` | Create backup |
 | POST | `/instances/{id}/backups/{bid}/restore` | Point-in-time restore |
-| GET | `/instances/{id}/replicas` | List read replicas |
 | POST | `/instances/{id}/replicas` | Add read replica |
-| DELETE | `/instances/{id}/replicas/{rid}` | Remove read replica |
-| GET | `/billing/usage` | CPU/memory usage metrics |
+| GET | `/billing/usage` | CPU/memory metrics |
 | GET | `/billing/summary` | Monthly cost summary |
-| GET | `/webhooks/endpoints` | List webhook endpoints |
-| POST | `/webhooks/endpoints` | Register endpoint |
-| DELETE | `/webhooks/endpoints/{id}` | Remove endpoint |
-| GET | `/admin/stats` | Platform stats (admin only) |
-| GET | `/admin/users` | All users (admin only) |
-| GET | `/admin/instances` | All instances (admin only) |
+| POST | `/webhooks/endpoints` | Register webhook endpoint |
+| GET | `/admin/stats` | Platform stats (admin) |
 | GET | `/health` | Health check |
-
----
-
-## Running Tests
-
-```bash
-# Requires a local PostgreSQL instance or the CI postgres service
-export DATABASE_URL="postgresql+asyncpg://postgres:postgres@localhost:5432/arc_test"
-
-pytest -x -q
-```
-
-Tests use a real PostgreSQL database (no mocks for the DB layer) and mock the Kubernetes client so no cluster is needed.
 
 ---
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `DATABASE_URL` | — | Control-plane DB connection string (asyncpg) |
-| `SECRET_KEY` | — | JWT signing secret (32-byte hex) |
-| `JWT_EXPIRE_MINUTES` | `60` | Access token lifetime |
-| `K8S_IN_CLUSTER` | `false` | `true` when running inside a pod |
-| `KUBECONFIG_PATH` | `~/.kube/config` | Path to kubeconfig (local dev) |
-| `ENVIRONMENT` | `dev` | `dev` = NodePort · `prod` = LoadBalancer |
-| `STORAGE_CLASS` | `standard` | `standard` (minikube) · `gp3` (EKS) |
-| `METERING_INTERVAL_SECS` | `60` | Metrics collection interval |
-| `SCALE_TO_ZERO_ENABLED` | `false` | Enable idle instance suspension |
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | Control-plane DB connection string (asyncpg) |
+| `SECRET_KEY` | JWT signing secret (32-byte hex) |
+| `K8S_IN_CLUSTER` | `true` when running inside a pod |
+| `ENVIRONMENT` | `dev` (NodePort) · `prod` (LoadBalancer) |
+| `STORAGE_CLASS` | `standard` (minikube) · `gp3` (EKS) |
+| `SCALE_TO_ZERO_ENABLED` | Enable idle instance suspension |
+| `METERING_INTERVAL_SECS` | Metrics collection interval (default: `60`) |
 
 ---
 
