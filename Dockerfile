@@ -27,7 +27,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Application code
 COPY api/       ./api/
-COPY alembic.ini ./
+COPY api/migrations/alembic.ini ./
 
 # Copy built frontend into the path the API serves (/ui → StaticFiles)
 COPY --from=frontend-builder /frontend/out ./dashboard/
