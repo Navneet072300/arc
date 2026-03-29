@@ -122,9 +122,7 @@ metadata:
   name: arc-api
   namespace: arc-system
   annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: "external"
-    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
-    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-type: "elb"
 spec:
   selector:
     app: arc-api
