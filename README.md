@@ -9,7 +9,7 @@
 
 ## Architecture
 
-(docs/screenshots/Serverless_arch.png)
+![Architecture](docs/screenshots/Serverless_arch.png)
 
 ---
 
