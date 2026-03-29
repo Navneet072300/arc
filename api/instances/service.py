@@ -13,6 +13,7 @@ from kubernetes import client as k8s_client
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.db.models.backup import Backup
 from api.db.models.instance import Instance
 from api.db.models.read_replica import ReadReplica
 from api.k8s import provisioner
@@ -297,3 +298,141 @@ async def delete_replica(
         logger.error("Error deprovisioning replica %s: %s", replica.slug, exc)
     replica.status = "deleted"
     await db.commit()
+
+
+# ── Backups / PITR ──────────────────────────────────────────────────────────
+
+async def list_backups(db: AsyncSession, instance: Instance) -> list[Backup]:
+    result = await db.execute(
+        select(Backup).where(
+            Backup.instance_id == instance.id,
+            Backup.status != "deleted",
+        ).order_by(Backup.created_at.desc())
+    )
+    return list(result.scalars())
+
+
+async def create_backup(
+    db: AsyncSession,
+    api_client: k8s_client.ApiClient,
+    instance: Instance,
+) -> Backup:
+    from datetime import UTC, datetime
+    import time as _time
+
+    ts = int(_time.time())
+    backup_slug = f"{instance.slug}-bk{ts}"
+
+    backup = Backup(
+        instance_id=instance.id,
+        slug=backup_slug,
+        status="creating",
+        k8s_job=f"pg-backup-{backup_slug}",
+        backup_pvc=f"pg-backup-{backup_slug}",
+    )
+    db.add(backup)
+    await db.commit()
+    await db.refresh(backup)
+
+    await provisioner.create_backup(api_client, instance, backup_slug)
+    return backup
+
+
+async def run_backup_watcher(
+    db: AsyncSession,
+    api_client: k8s_client.ApiClient,
+    instance: Instance,
+    backup: Backup,
+) -> None:
+    """Poll K8s Job until backup completes, then update status."""
+    from datetime import UTC, datetime
+
+    for _ in range(120):  # up to 10 min
+        await asyncio.sleep(5)
+        job_status = await provisioner.get_backup_job_status(api_client, instance, backup.slug)
+        if job_status in ("succeeded", "failed"):
+            result = await db.execute(select(Backup).where(Backup.id == backup.id))
+            b = result.scalar_one_or_none()
+            if b:
+                b.status = "ready" if job_status == "succeeded" else "failed"
+                b.completed_at = datetime.now(tz=UTC)
+                await db.commit()
+            return
+
+
+async def delete_backup(
+    db: AsyncSession,
+    api_client: k8s_client.ApiClient,
+    instance: Instance,
+    backup: Backup,
+) -> None:
+    backup.status = "deleted"
+    await db.commit()
+    try:
+        await provisioner.delete_backup_resources(api_client, instance, backup.slug)
+    except Exception as exc:
+        logger.error("Error deleting backup resources %s: %s", backup.slug, exc)
+
+
+async def restore_backup(
+    db: AsyncSession,
+    api_client: k8s_client.ApiClient,
+    instance: Instance,
+    backup: Backup,
+    recovery_target_time: str | None = None,
+) -> Instance:
+    """
+    Create a new Instance record representing the restored fork, then
+    spin up its K8s resources in the same namespace.
+    """
+    import time as _time
+
+    ts = int(_time.time())
+    restored_slug = f"{instance.slug}-rs{ts}"
+    namespace = instance.k8s_namespace  # same namespace as primary
+    sts_name = f"pg-{restored_slug}"
+
+    restored = Instance(
+        user_id=instance.user_id,
+        name=f"{instance.name} (restored)",
+        slug=restored_slug,
+        status="restoring",
+        k8s_namespace=namespace,
+        k8s_statefulset=sts_name,
+        k8s_secret_name=instance.k8s_secret_name,  # reuse same credentials
+        pg_version=instance.pg_version,
+        cpu_request=instance.cpu_request,
+        cpu_limit=instance.cpu_limit,
+        mem_request=instance.mem_request,
+        mem_limit=instance.mem_limit,
+        storage_size=instance.storage_size,
+        pg_db_name=instance.pg_db_name,
+        pg_username=instance.pg_username,
+        pool_mode=instance.pool_mode,
+        pool_size=instance.pool_size,
+        max_client_conn=instance.max_client_conn,
+        auto_suspend=False,
+    )
+    db.add(restored)
+    await db.commit()
+    await db.refresh(restored)
+
+    await provisioner.restore_from_backup(
+        api_client, instance, backup.slug, restored_slug, recovery_target_time
+    )
+
+    # Poll until ready, then update endpoint + status
+    for _ in range(72):  # up to 6 min
+        await asyncio.sleep(5)
+        if await provisioner.get_statefulset_ready(api_client, restored):
+            break
+
+    endpoint = await provisioner.get_service_endpoint(api_client, restored)
+    result = await db.execute(select(Instance).where(Instance.id == restored.id))
+    restored = result.scalar_one()
+    if endpoint:
+        restored.external_host, restored.external_port = endpoint
+    restored.status = "running"
+    await db.commit()
+    await db.refresh(restored)
+    return restored

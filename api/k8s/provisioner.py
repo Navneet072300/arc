@@ -67,7 +67,17 @@ async def provision_instance(
         )
         logger.info("Created replication ConfigMap for %s", instance.slug)
 
-        # 4. PVC
+        # 4. WAL archive PVC (for PITR)
+        await loop.run_in_executor(
+            None,
+            lambda: core.create_namespaced_persistent_volume_claim(
+                namespace=instance.k8s_namespace,
+                body=manifests.wal_archive_pvc_manifest(instance),
+            ),
+        )
+        logger.info("Created WAL archive PVC for %s", instance.slug)
+
+        # 5. PVC
         await loop.run_in_executor(
             None,
             lambda: core.create_namespaced_persistent_volume_claim(
@@ -254,6 +264,140 @@ async def get_replica_ready(
         return (sts.status.ready_replicas or 0) >= 1
     except ApiException:
         return False
+
+
+# ── PITR: Backup & Restore ───────────────────────────────────────────────────
+
+async def create_backup(
+    api_client: client.ApiClient,
+    instance: Instance,
+    backup_slug: str,
+) -> None:
+    """Create backup PVC and trigger a pg_basebackup Job."""
+    loop = asyncio.get_event_loop()
+    core = _core(api_client)
+    batch = client.BatchV1Api(api_client)
+
+    try:
+        await loop.run_in_executor(
+            None,
+            lambda: core.create_namespaced_persistent_volume_claim(
+                namespace=instance.k8s_namespace,
+                body=manifests.backup_pvc_manifest(instance, backup_slug),
+            ),
+        )
+        await loop.run_in_executor(
+            None,
+            lambda: batch.create_namespaced_job(
+                namespace=instance.k8s_namespace,
+                body=manifests.backup_job_manifest(instance, backup_slug),
+            ),
+        )
+        logger.info("Created backup job for %s → %s", instance.slug, backup_slug)
+    except ApiException as exc:
+        raise K8sProvisioningError(str(exc)) from exc
+
+
+async def get_backup_job_status(
+    api_client: client.ApiClient,
+    instance: Instance,
+    backup_slug: str,
+) -> str:
+    """Return 'succeeded' | 'failed' | 'running'."""
+    loop = asyncio.get_event_loop()
+    batch = client.BatchV1Api(api_client)
+    try:
+        job = await loop.run_in_executor(
+            None,
+            lambda: batch.read_namespaced_job(
+                name=f"pg-backup-{backup_slug}",
+                namespace=instance.k8s_namespace,
+            ),
+        )
+        if job.status.succeeded and job.status.succeeded >= 1:
+            return "succeeded"
+        if job.status.failed and job.status.failed >= job.spec.backoff_limit + 1:
+            return "failed"
+        return "running"
+    except ApiException:
+        return "failed"
+
+
+async def delete_backup_resources(
+    api_client: client.ApiClient,
+    instance: Instance,
+    backup_slug: str,
+) -> None:
+    """Delete backup Job + PVC."""
+    loop = asyncio.get_event_loop()
+    core = _core(api_client)
+    batch = client.BatchV1Api(api_client)
+    for coro in [
+        lambda: batch.delete_namespaced_job(
+            name=f"pg-backup-{backup_slug}",
+            namespace=instance.k8s_namespace,
+            body=client.V1DeleteOptions(propagation_policy="Foreground"),
+        ),
+        lambda: core.delete_namespaced_persistent_volume_claim(
+            name=f"pg-backup-{backup_slug}",
+            namespace=instance.k8s_namespace,
+        ),
+    ]:
+        try:
+            await loop.run_in_executor(None, coro)
+        except ApiException as exc:
+            if exc.status != 404:
+                logger.warning("Error deleting backup resource %s: %s", backup_slug, exc)
+
+
+async def restore_from_backup(
+    api_client: client.ApiClient,
+    instance: Instance,
+    backup_slug: str,
+    restored_slug: str,
+    recovery_target_time: str | None = None,
+) -> None:
+    """
+    Create a restored instance StatefulSet + services in the same namespace.
+    Uses backup PVC data + WAL archive for point-in-time recovery.
+    """
+    loop = asyncio.get_event_loop()
+    core = _core(api_client)
+    apps = _apps(api_client)
+
+    try:
+        # New data PVC for the restored instance
+        await loop.run_in_executor(
+            None,
+            lambda: core.create_namespaced_persistent_volume_claim(
+                namespace=instance.k8s_namespace,
+                body=manifests.pvc_manifest_for_slug(instance, restored_slug),
+            ),
+        )
+
+        # Restored StatefulSet (init container copies backup → data PVC)
+        await loop.run_in_executor(
+            None,
+            lambda: apps.create_namespaced_stateful_set(
+                namespace=instance.k8s_namespace,
+                body=manifests.restore_statefulset_manifest(
+                    instance, backup_slug, restored_slug, recovery_target_time
+                ),
+            ),
+        )
+
+        # External service for restored instance
+        await loop.run_in_executor(
+            None,
+            lambda: core.create_namespaced_service(
+                namespace=instance.k8s_namespace,
+                body=manifests.replica_service_manifest(instance, restored_slug),
+            ),
+        )
+        logger.info("Triggered restore %s from backup %s (target_time=%s)",
+                    restored_slug, backup_slug, recovery_target_time)
+    except ApiException as exc:
+        raise K8sProvisioningError(str(exc)) from exc
 
 
 async def deprovision_instance(api_client: client.ApiClient, instance: Instance) -> None:

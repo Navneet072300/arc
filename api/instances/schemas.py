@@ -92,6 +92,22 @@ class InstanceStatusResponse(BaseModel):
     external_port: int | None
 
 
+class BackupResponse(BaseModel):
+    id: uuid.UUID
+    instance_id: uuid.UUID
+    slug: str
+    status: str
+    size_bytes: int | None
+    created_at: datetime
+    completed_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class RestoreRequest(BaseModel):
+    recovery_target_time: str | None = None  # ISO 8601 e.g. "2026-03-29T10:00:00"
+
+
 class ReadReplicaResponse(BaseModel):
     id: uuid.UUID
     instance_id: uuid.UUID

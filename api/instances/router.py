@@ -112,6 +112,88 @@ async def delete_instance(
     return {"detail": "Deletion initiated", "id": str(instance_id)}
 
 
+@router.get("/{instance_id}/backups", response_model=list[schemas.BackupResponse])
+async def list_backups(
+    instance_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    instance = await service.get_instance(db, current_user.id, instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    return await service.list_backups(db, instance)
+
+
+@router.post(
+    "/{instance_id}/backups",
+    response_model=schemas.BackupResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_backup(
+    instance_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    instance = await service.get_instance(db, current_user.id, instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    if instance.status != "running":
+        raise HTTPException(status_code=400, detail="Instance must be running to create a backup")
+    api_client = get_k8s_client()
+    backup = await service.create_backup(db, api_client, instance)
+    background_tasks.add_task(service.run_backup_watcher, db, api_client, instance, backup)
+    return backup
+
+
+@router.delete("/{instance_id}/backups/{backup_id}", status_code=status.HTTP_202_ACCEPTED)
+async def delete_backup(
+    instance_id: uuid.UUID,
+    backup_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    instance = await service.get_instance(db, current_user.id, instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    backups = await service.list_backups(db, instance)
+    backup = next((b for b in backups if b.id == backup_id), None)
+    if not backup:
+        raise HTTPException(status_code=404, detail="Backup not found")
+    api_client = get_k8s_client()
+    await service.delete_backup(db, api_client, instance, backup)
+    return {"detail": "Backup deleted", "id": str(backup_id)}
+
+
+@router.post(
+    "/{instance_id}/backups/{backup_id}/restore",
+    response_model=schemas.InstanceResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def restore_backup(
+    instance_id: uuid.UUID,
+    backup_id: uuid.UUID,
+    body: schemas.RestoreRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    instance = await service.get_instance(db, current_user.id, instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    backups = await service.list_backups(db, instance)
+    backup = next((b for b in backups if b.id == backup_id), None)
+    if not backup:
+        raise HTTPException(status_code=404, detail="Backup not found")
+    if backup.status != "ready":
+        raise HTTPException(status_code=400, detail="Backup is not ready")
+    api_client = get_k8s_client()
+    restored = await service.restore_backup(
+        db, api_client, instance, backup, body.recovery_target_time
+    )
+    return restored
+
+
 @router.get("/{instance_id}/replicas", response_model=list[schemas.ReadReplicaResponse])
 async def list_replicas(
     instance_id: uuid.UUID,

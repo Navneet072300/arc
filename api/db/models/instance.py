@@ -53,3 +53,6 @@ class Instance(Base):
     read_replicas: Mapped[list["ReadReplica"]] = relationship(  # noqa: F821
         "ReadReplica", back_populates="instance", lazy="select"
     )
+    backups: Mapped[list["Backup"]] = relationship(  # noqa: F821
+        "Backup", back_populates="instance", lazy="select"
+    )
