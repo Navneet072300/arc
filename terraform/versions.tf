@@ -17,7 +17,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "REPLACE_WITH_YOUR_BUCKET_NAME"
+    bucket         = "arc-tfstate-061640054424"
     key            = "arc/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "terraform-state-lock"

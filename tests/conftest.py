@@ -1,4 +1,5 @@
 import asyncio
+import os
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,7 +12,10 @@ from api.db.base import Base
 from api.db.session import get_db
 from api.main import app
 
-TEST_DB_URL = "sqlite+aiosqlite:///./test.db"
+TEST_DB_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/arc_test",
+)
 
 
 @pytest.fixture(scope="session")
