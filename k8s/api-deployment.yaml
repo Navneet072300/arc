@@ -1,49 +1,174 @@
+---
+# Namespace for the Arc control plane
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: arc-system
+  labels:
+    app.kubernetes.io/managed-by: arc
+
+---
+# RBAC: ServiceAccount for the Arc API
+# (Full file is in k8s/rbac/ — this is the deployment reference)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: arc-api
+  namespace: arc-system
+
+---
+# Secret — populate from terraform outputs / CI secrets
+# kubectl create secret generic arc-api-env -n arc-system \
+#   --from-literal=DATABASE_URL="postgresql+asyncpg://..." \
+#   --from-literal=SECRET_KEY="..." \
+#   --from-literal=ENVIRONMENT="prod" \
+#   --from-literal=STORAGE_CLASS="gp3"
+apiVersion: v1
+kind: Secret
+metadata:
+  name: arc-api-env
+  namespace: arc-system
+type: Opaque
+# data keys (base64 encoded):
+#   DATABASE_URL
+#   SECRET_KEY
+#   ENVIRONMENT
+#   STORAGE_CLASS
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: serverless-pg-api
-  namespace: default
+  name: arc-api
+  namespace: arc-system
+  labels:
+    app: arc-api
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
-      app: serverless-pg-api
+      app: arc-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels:
-        app: serverless-pg-api
+        app: arc-api
     spec:
-      serviceAccountName: serverless-pg-api
+      serviceAccountName: arc-api
+      terminationGracePeriodSeconds: 30
+
       containers:
         - name: api
-          image: serverless-pg-api:latest   # built locally or pushed to ECR
-          imagePullPolicy: IfNotPresent
+          # Replace with your ECR image URL from terraform output ecr_repository_url
+          image: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/arc-api:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8000
+              name: http
+
           envFrom:
             - secretRef:
-                name: serverless-pg-api-env
+                name: arc-api-env
+
           env:
             - name: K8S_IN_CLUSTER
               value: "true"
             - name: ENVIRONMENT
-              value: "dev"     # change to "prod" for EKS
+              value: "prod"
+            - name: SCALE_TO_ZERO_ENABLED
+              value: "true"
+
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
             periodSeconds: 10
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: arc-api
+                topologyKey: kubernetes.io/hostname
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: serverless-pg-api
-  namespace: default
+  name: arc-api
+  namespace: arc-system
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
 spec:
   selector:
-    app: serverless-pg-api
+    app: arc-api
   ports:
     - port: 80
       targetPort: 8000
-  type: ClusterIP
+      name: http
+  type: LoadBalancer
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: arc-api-pdb
+  namespace: arc-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: arc-api
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: arc-api-hpa
+  namespace: arc-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: arc-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80

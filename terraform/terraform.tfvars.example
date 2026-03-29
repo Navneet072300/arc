@@ -1,0 +1,24 @@
+aws_region   = "us-east-1"
+environment  = "prod"
+cluster_name = "arc-cluster"
+
+# VPC
+vpc_cidr = "10.0.0.0/16"
+# availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
+
+# EKS node group
+node_instance_type = "t3.medium"
+node_desired_size  = 3
+node_min_size      = 2
+node_max_size      = 10
+node_disk_size_gb  = 50
+
+# RDS (control-plane database)
+rds_instance_class   = "db.t3.micro"
+rds_postgres_version = "16"
+rds_db_name          = "arc_control"
+rds_username         = "arcadmin"
+rds_password         = "CHANGE_ME_USE_SECRETS_MANAGER"
+rds_multi_az         = false
+rds_storage_gb       = 20
+rds_max_storage_gb   = 100

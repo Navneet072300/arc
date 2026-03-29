@@ -1,12 +1,12 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: serverless-pg-manager-binding
+  name: arc-api-manager-binding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: serverless-pg-manager
+  name: arc-api-manager
 subjects:
   - kind: ServiceAccount
-    name: serverless-pg-api
-    namespace: default
+    name: arc-api
+    namespace: arc-system

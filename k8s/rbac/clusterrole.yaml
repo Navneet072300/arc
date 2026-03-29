@@ -1,19 +1,24 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: serverless-pg-manager
+  name: arc-api-manager
 rules:
   # Namespace management
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "create", "delete"]
 
-  # Secrets (PostgreSQL credentials)
+  # Secrets (PostgreSQL credentials + replication passwords)
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create", "patch", "delete"]
 
-  # PersistentVolumeClaims
+  # ConfigMaps (initdb scripts, replication config)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "patch", "delete"]
+
+  # PersistentVolumeClaims (data, WAL archive, backup)
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "create", "delete"]
@@ -23,17 +28,22 @@ rules:
     resources: ["services"]
     verbs: ["get", "list", "create", "patch", "delete"]
 
-  # Pods (for readiness checks)
+  # Pods (readiness checks)
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
 
-  # StatefulSets
+  # StatefulSets (primary, replicas, restored instances)
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["get", "list", "create", "patch", "delete"]
 
-  # Metrics server (for metering)
+  # Jobs (pg_basebackup backup jobs)
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create", "delete"]
+
+  # Metrics server (metering / scale-to-zero idle detection)
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods", "nodes"]
     verbs: ["get", "list"]
