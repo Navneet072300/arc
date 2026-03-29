@@ -91,6 +91,6 @@ resource "aws_db_instance" "main" {
   tags = { Name = "${var.cluster_name}-control-plane" }
 
   lifecycle {
-    prevent_destroy = true
+    prevent_destroy = false
   }
 }
