@@ -16,14 +16,13 @@ terraform {
     }
   }
 
-  # Uncomment to store state in S3 (recommended for teams)
-  # backend "s3" {
-  #   bucket         = "your-terraform-state-bucket"
-  #   key            = "arc/terraform.tfstate"
-  #   region         = "us-east-1"
-  #   dynamodb_table = "terraform-state-lock"
-  #   encrypt        = true
-  # }
+  backend "s3" {
+    bucket         = "REPLACE_WITH_YOUR_BUCKET_NAME"
+    key            = "arc/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "terraform-state-lock"
+    encrypt        = true
+  }
 }
 
 provider "aws" {
