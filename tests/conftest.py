@@ -5,7 +5,10 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
+import api.metering.collector as _metering
+import api.webhooks.service as _webhooks
 from api.db.base import Base
 from api.db.session import get_db
 from api.main import app
@@ -18,10 +21,23 @@ TEST_DB_URL = os.environ.get(
 
 @pytest_asyncio.fixture
 async def test_engine():
-    engine = create_async_engine(TEST_DB_URL, echo=False)
+    # NullPool: no connection reuse across event loops — safe for function-scoped tests
+    engine = create_async_engine(TEST_DB_URL, echo=False, poolclass=NullPool)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    test_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    # Patch every module that bypasses get_db and calls AsyncSessionLocal directly
+    original_webhooks = _webhooks.AsyncSessionLocal
+    original_metering = _metering.AsyncSessionLocal
+    _webhooks.AsyncSessionLocal = test_session_factory
+    _metering.AsyncSessionLocal = test_session_factory
+
     yield engine
+
+    _webhooks.AsyncSessionLocal = original_webhooks
+    _metering.AsyncSessionLocal = original_metering
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
