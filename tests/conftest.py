@@ -41,7 +41,7 @@ async def client(db_session):
 
     app.dependency_overrides[get_db] = override_get_db
 
-    with patch("api.k8s.client.get_k8s_client") as mock_k8s:
+    with patch("api.instances.router.get_k8s_client") as mock_k8s:
         mock_k8s.return_value = MagicMock()
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             yield ac
