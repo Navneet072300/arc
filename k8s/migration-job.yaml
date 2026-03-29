@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: arc-migrate
+  namespace: arc-system
+  labels:
+    app: arc-migrate
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: arc-migrate
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: arc-api
+      containers:
+        - name: migrate
+          # Same image as the API — just runs alembic instead of uvicorn
+          image: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/arc-api:latest
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - secretRef:
+                name: arc-api-env
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

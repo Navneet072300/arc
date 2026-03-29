@@ -1,0 +1,155 @@
+name: Deploy to EKS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag (default: git SHA)"
+        required: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: arc-api
+  EKS_CLUSTER: arc-cluster
+
+jobs:
+  # ── Test ────────────────────────────────────────────────────────────────────
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: arc_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/arc_test
+          SECRET_KEY: test-secret-key-32-bytes-long-xx
+        run: pytest -x -q
+
+  # ── Build & Push ─────────────────────────────────────────────────────────────
+  build:
+    name: Build & push image
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+      ecr_url: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Compute image tag
+        id: meta
+        run: |
+          TAG="${{ github.event.inputs.image_tag || github.sha }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Deploy ───────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: build
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER }}
+
+      - name: Run database migrations
+        env:
+          ECR_URL: ${{ needs.build.outputs.ecr_url }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          # Delete any previous migration job so we can re-run
+          kubectl delete job arc-migrate -n arc-system --ignore-not-found
+
+          sed "s|ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/arc-api:latest|${ECR_URL}:${IMAGE_TAG}|g" \
+            k8s/migration-job.yaml | kubectl apply -f -
+
+          kubectl wait job/arc-migrate -n arc-system \
+            --for=condition=complete --timeout=180s \
+            || { kubectl logs -n arc-system -l app=arc-migrate --tail=100; exit 1; }
+
+      - name: Deploy Arc API
+        env:
+          ECR_URL: ${{ needs.build.outputs.ecr_url }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          sed "s|ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/arc-api:latest|${ECR_URL}:${IMAGE_TAG}|g" \
+            k8s/api-deployment.yaml | kubectl apply -f -
+
+          kubectl rollout status deployment/arc-api \
+            -n arc-system --timeout=300s
+
+      - name: Print endpoint
+        run: |
+          LB=$(kubectl get svc arc-api -n arc-system \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+          echo "### Deployment complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image tag | \`${{ needs.build.outputs.image_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Load balancer | \`${LB}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Health check | http://${LB}/health |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dashboard | http://${LB}/ui |" >> "$GITHUB_STEP_SUMMARY"

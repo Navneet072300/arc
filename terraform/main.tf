@@ -83,38 +83,16 @@ resource "aws_ecr_lifecycle_policy" "arc_api" {
   })
 }
 
-# ── StorageClass (gp3, default for Arc instance PVCs) ────────────────────────
-# Applied post-cluster via kubectl; stored here as a rendered manifest
-# that the deploy script applies with: kubectl apply -f -
-
-resource "local_file" "storageclass" {
-  filename = "${path.module}/rendered/storageclass-gp3.yaml"
-  content  = <<-YAML
-    apiVersion: storage.k8s.io/v1
-    kind: StorageClass
-    metadata:
-      name: gp3
-      annotations:
-        storageclass.kubernetes.io/is-default-class: "true"
-    provisioner: ebs.csi.aws.com
-    volumeBindingMode: WaitForFirstConsumer
-    reclaimPolicy: Retain
-    parameters:
-      type: gp3
-      encrypted: "true"
-  YAML
-}
-
 # ── Kubeconfig helper ─────────────────────────────────────────────────────────
 
 resource "local_file" "kubeconfig_cmd" {
-  filename = "${path.module}/rendered/update-kubeconfig.sh"
-  content  = <<-SH
+  filename        = "${path.module}/rendered/update-kubeconfig.sh"
+  file_permission = "0755"
+  content         = <<-SH
     #!/bin/bash
     aws eks update-kubeconfig \
       --region ${data.aws_region.current.name} \
       --name ${module.eks.cluster_name} \
       --alias ${module.eks.cluster_name}
   SH
-  file_permission = "0755"
 }

@@ -96,14 +96,6 @@ resource "aws_security_group" "nodes" {
     self        = true
   }
 
-  ingress {
-    description     = "Control plane to nodes"
-    from_port       = 1025
-    to_port         = 65535
-    protocol        = "tcp"
-    security_group_id = aws_security_group.cluster.id
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -163,6 +155,12 @@ resource "aws_eks_addon" "kube_proxy" {
 resource "aws_eks_addon" "vpc_cni" {
   cluster_name                = aws_eks_cluster.main.name
   addon_name                  = "vpc-cni"
+  resolve_conflicts_on_create = "OVERWRITE"
+}
+
+resource "aws_eks_addon" "metrics_server" {
+  cluster_name                = aws_eks_cluster.main.name
+  addon_name                  = "eks-pod-identity-agent"
   resolve_conflicts_on_create = "OVERWRITE"
 }
 
