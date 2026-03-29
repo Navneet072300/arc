@@ -65,9 +65,11 @@ def test_statefulset_manifest():
     m = statefulset_manifest(inst)
     assert m["kind"] == "StatefulSet"
     containers = m["spec"]["template"]["spec"]["containers"]
-    assert len(containers) == 1
-    assert containers[0]["image"] == "postgres:16-alpine"
-    assert containers[0]["resources"]["requests"]["cpu"] == "250m"
+    assert len(containers) == 2  # postgres + pgbouncer sidecar
+    pg = next(c for c in containers if c["name"] != "pgbouncer")
+    assert pg["image"] == "postgres:16-alpine"
+    assert pg["resources"]["requests"]["cpu"] == "250m"
+    assert any(c["name"] == "pgbouncer" for c in containers)
 
 
 def test_clusterip_service():
